@@ -1,0 +1,42 @@
+[
+  {
+    "title": "Barack Obama",
+    "content": [
+      "Barack Obama was born in Honolulu, Hawaii in 1961.",
+      "He served as the 44th President of the United States from 2009 to 2017.",
+      "Obama graduated from Harvard Law School in 1991.",
+      "He was a senator from Illinois before becoming president.",
+      "Obama received the Nobel Peace Prize in 2009."
+    ]
+  },
+  {
+    "title": "Michelle Obama",
+    "content": [
+      "Michelle Obama was born on January 17, 1964 in Chicago, Illinois.",
+      "She is an American lawyer and writer.",
+      "Michelle Obama was the First Lady of the United States from 2009 to 2017.",
+      "She married Barack Obama in 1992.",
+      "Michelle graduated from Princeton University and Harvard Law School."
+    ]
+  },
+  {
+    "title": "Harvard Law School",
+    "content": [
+      "Harvard Law School is one of the professional graduate schools of Harvard University.",
+      "It was founded in 1817 and is the oldest continuously operating law school in the United States.",
+      "The school is located in Cambridge, Massachusetts.",
+      "Many notable lawyers and politicians graduated from Harvard Law School.",
+      "Barack Obama and Michelle Obama both graduated from Harvard Law School."
+    ]
+  },
+  {
+    "title": "Nobel Peace Prize",
+    "content": [
+      "The Nobel Peace Prize is awarded annually in Oslo, Norway.",
+      "It was established by the will of Alfred Nobel in 1895.",
+      "The prize is given to those who have done the most or best work for fraternity between nations.",
+      "Barack Obama received the Nobel Peace Prize in 2009.",
+      "Other notable recipients include Martin Luther King Jr. and Nelson Mandela."
+    ]
+  }
+]

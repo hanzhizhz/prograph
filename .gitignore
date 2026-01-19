@@ -1,0 +1,28 @@
+# ProGraph 排除文件
+
+# 日志和输出
+logs/
+output/
+nohup.out
+
+# 临时文件
+*.pyc
+__pycache__/
+*.so
+.Python
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 大数据文件 - 只保留小规模初始数据
+other_output/
+dataset/
+raw_dataset/
+*.arrow
+*.parquet
+
+# 其他
+专业实践-额外内容/

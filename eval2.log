@@ -1,0 +1,252 @@
+nohup: 忽略输入
+[2026-01-18 16:49:04] INFO 5.2-evaluate_with_llm_judge.py:212: 开始并发评估 949 个样本，并发度: 100
+[2026-01-18 16:49:04] INFO 5.2-evaluate_with_llm_judge.py:212: 开始并发评估 200 个样本，并发度: 100
+[2026-01-18 16:49:04] INFO 5.2-evaluate_with_llm_judge.py:212: 开始并发评估 962 个样本，并发度: 100
+[2026-01-18 16:49:04] INFO 5.2-evaluate_with_llm_judge.py:212: 开始并发评估 949 个样本，并发度: 100
+[2026-01-18 16:49:04] INFO 5.2-evaluate_with_llm_judge.py:212: 开始并发评估 995 个样本，并发度: 100
+[2026-01-18 16:49:04] INFO 5.2-evaluate_with_llm_judge.py:212: 开始并发评估 962 个样本，并发度: 100
+[2026-01-18 16:49:04] INFO 5.2-evaluate_with_llm_judge.py:212: 开始并发评估 200 个样本，并发度: 100
+[2026-01-18 16:49:04] INFO 5.2-evaluate_with_llm_judge.py:212: 开始并发评估 200 个样本，并发度: 100
+[2026-01-18 16:49:04] INFO 5.2-evaluate_with_llm_judge.py:212: 开始并发评估 200 个样本，并发度: 100
+[2026-01-18 16:49:04] INFO 5.2-evaluate_with_llm_judge.py:212: 开始并发评估 1000 个样本，并发度: 100
+[2026-01-18 16:49:04] INFO 5.2-evaluate_with_llm_judge.py:212: 开始并发评估 1000 个样本，并发度: 100
+[2026-01-18 16:49:04] INFO 5.2-evaluate_with_llm_judge.py:212: 开始并发评估 1000 个样本，并发度: 100
+[2026-01-18 16:49:04] INFO 5.2-evaluate_with_llm_judge.py:212: 开始并发评估 10 个样本，并发度: 100
+[2026-01-18 16:49:15] INFO _base_client.py:1621: Retrying request to /chat/completions in 0.459883 seconds
+[2026-01-18 16:49:23] INFO _base_client.py:1621: Retrying request to /chat/completions in 0.407835 seconds
+[2026-01-18 16:49:30] INFO _base_client.py:1621: Retrying request to /chat/completions in 0.468413 seconds
+[2026-01-18 16:49:38] INFO _base_client.py:1621: Retrying request to /chat/completions in 0.388365 seconds
+在 other_output/unified_results 中查找统一格式结果文件...
+
+找到 13 个结果文件:
+  - ggagent2_2wiki.json
+  - ggagent2_hotpotqa.json
+  - ggagent2_musique.json
+  - ggagent_2wiki.json
+  - ggagent_hotpotqa.json
+  - ggagent_musique.json
+  - hipporagv2_2wikimultihopqa.json
+  - hipporagv2_hotpotqa_distractor.json
+  - hipporagv2_musique.json
+  - hoprag_2wiki.json
+  - hoprag_hotpotqa.json
+  - hoprag_musique.json
+  - test_sample.json
+
+开始并行处理 13 个文件...
+
+============================================================
+处理文件: ggagent2_2wiki.json
+============================================================
+加载成功: ggagent2_2wiki.json
+  方法: GGAgent2
+  数据集: 2WikiMultiHop
+  样本数: 949
+转换后的数据已保存到: other_output/unified_results/evaluation_results/ggagent2_2wiki_converted.json
+
+开始LLM-as-Judge评估...
+
+============================================================
+处理文件: ggagent2_hotpotqa.json
+============================================================
+加载成功: ggagent2_hotpotqa.json
+  方法: GGAgent2
+  数据集: HotpotQA
+  样本数: 200
+转换后的数据已保存到: other_output/unified_results/evaluation_results/ggagent2_hotpotqa_converted.json
+
+开始LLM-as-Judge评估...
+
+============================================================
+处理文件: ggagent2_musique.json
+============================================================
+加载成功: ggagent2_musique.json
+  方法: GGAgent2
+  数据集: MuSiQue
+  样本数: 962
+转换后的数据已保存到: other_output/unified_results/evaluation_results/ggagent2_musique_converted.json
+
+开始LLM-as-Judge评估...
+
+============================================================
+处理文件: ggagent_2wiki.json
+============================================================
+加载成功: ggagent_2wiki.json
+  方法: GGAgent
+  数据集: 2WikiMultiHop
+  样本数: 949
+转换后的数据已保存到: other_output/unified_results/evaluation_results/ggagent_2wiki_converted.json
+
+开始LLM-as-Judge评估...
+
+============================================================
+处理文件: ggagent_hotpotqa.json
+============================================================
+加载成功: ggagent_hotpotqa.json
+  方法: GGAgent
+  数据集: HotpotQA
+  样本数: 995
+转换后的数据已保存到: other_output/unified_results/evaluation_results/ggagent_hotpotqa_converted.json
+
+开始LLM-as-Judge评估...
+
+============================================================
+处理文件: ggagent_musique.json
+============================================================
+加载成功: ggagent_musique.json
+  方法: GGAgent
+  数据集: MuSiQue
+  样本数: 962
+转换后的数据已保存到: other_output/unified_results/evaluation_results/ggagent_musique_converted.json
+
+开始LLM-as-Judge评估...
+
+============================================================
+处理文件: hipporagv2_2wikimultihopqa.json
+============================================================
+加载成功: hipporagv2_2wikimultihopqa.json
+  方法: HippoRAGv2
+  数据集: 2WikiMultiHop
+  样本数: 200
+转换后的数据已保存到: other_output/unified_results/evaluation_results/hipporagv2_2wikimultihopqa_converted.json
+
+开始LLM-as-Judge评估...
+
+============================================================
+处理文件: hipporagv2_hotpotqa_distractor.json
+============================================================
+加载成功: hipporagv2_hotpotqa_distractor.json
+  方法: HippoRAGv2
+  数据集: HotpotQA
+  样本数: 200
+转换后的数据已保存到: other_output/unified_results/evaluation_results/hipporagv2_hotpotqa_distractor_converted.json
+
+开始LLM-as-Judge评估...
+
+============================================================
+处理文件: hipporagv2_musique.json
+============================================================
+加载成功: hipporagv2_musique.json
+  方法: HippoRAGv2
+  数据集: MuSiQue
+  样本数: 200
+转换后的数据已保存到: other_output/unified_results/evaluation_results/hipporagv2_musique_converted.json
+
+开始LLM-as-Judge评估...
+
+============================================================
+处理文件: hoprag_2wiki.json
+============================================================
+加载成功: hoprag_2wiki.json
+  方法: HopRAG
+  数据集: 2WikiMultiHop
+  样本数: 1000
+转换后的数据已保存到: other_output/unified_results/evaluation_results/hoprag_2wiki_converted.json
+
+开始LLM-as-Judge评估...
+
+============================================================
+处理文件: hoprag_hotpotqa.json
+============================================================
+加载成功: hoprag_hotpotqa.json
+  方法: HopRAG
+  数据集: HotpotQA
+  样本数: 1000
+转换后的数据已保存到: other_output/unified_results/evaluation_results/hoprag_hotpotqa_converted.json
+
+开始LLM-as-Judge评估...
+
+============================================================
+处理文件: hoprag_musique.json
+============================================================
+加载成功: hoprag_musique.json
+  方法: HopRAG
+  数据集: MuSiQue
+  样本数: 1000
+转换后的数据已保存到: other_output/unified_results/evaluation_results/hoprag_musique_converted.json
+
+开始LLM-as-Judge评估...
+
+============================================================
+处理文件: test_sample.json
+============================================================
+加载成功: test_sample.json
+  方法: HippoRAGv2
+  数据集: 2WikiMultiHop
+  样本数: 10
+转换后的数据已保存到: other_output/unified_results/evaluation_results/test_sample_converted.json
+
+开始LLM-as-Judge评估...
+
+============================================================
+评估汇总
+============================================================
+
+GGAgent2 on 2WikiMultiHop:
+  - 样本数: 949
+  - 正确数: 865
+  - 正确率: 91.15%
+
+GGAgent2 on HotpotQA:
+  - 样本数: 200
+  - 正确数: 141
+  - 正确率: 70.50%
+
+GGAgent2 on MuSiQue:
+  - 样本数: 962
+  - 正确数: 479
+  - 正确率: 49.79%
+
+GGAgent on 2WikiMultiHop:
+  - 样本数: 949
+  - 正确数: 865
+  - 正确率: 91.15%
+
+GGAgent on HotpotQA:
+  - 样本数: 995
+  - 正确数: 860
+  - 正确率: 86.43%
+
+GGAgent on MuSiQue:
+  - 样本数: 962
+  - 正确数: 469
+  - 正确率: 48.75%
+
+HippoRAGv2 on 2WikiMultiHop:
+  - 样本数: 210
+  - 正确数: 178
+  - 正确率: 84.76%
+
+HippoRAGv2 on HotpotQA:
+  - 样本数: 200
+  - 正确数: 173
+  - 正确率: 86.50%
+
+HippoRAGv2 on MuSiQue:
+  - 样本数: 200
+  - 正确数: 123
+  - 正确率: 61.50%
+
+HopRAG on 2WikiMultiHop:
+  - 样本数: 1000
+  - 正确数: 658
+  - 正确率: 65.80%
+
+HopRAG on HotpotQA:
+  - 样本数: 1000
+  - 正确数: 672
+  - 正确率: 67.20%
+
+HopRAG on MuSiQue:
+  - 样本数: 1000
+  - 正确数: 371
+  - 正确率: 37.10%
+
+------------------------------------------------------------
+总体结果:
+  - 总样本数: 8627
+  - 总正确数: 5854
+  - 总体正确率: 67.86%
+============================================================
+
+汇总结果已保存到: other_output/unified_results/evaluation_results/llm_judge_summary.json

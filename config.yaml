@@ -1,0 +1,133 @@
+# ProGraph 配置文件
+# 可以通过环境变量覆盖这些配置（环境变量优先级更高）
+
+# 模型配置
+model:
+  # vLLM 配置（用于离线图构建）
+  vllm:
+    model_path: "/data/zhz/model/Qwen3-30B-A3B-Instruct-2507-Int4-W4A16"
+    tensor_parallel_size: 2
+    gpu_memory_utilization: 0.65
+    trust_remote_code: true
+    max_model_len: 16384
+
+  # vLLM Embedding 配置（用于离线嵌入向量生成）
+  vllm_embedding:
+    model_path: "/data/zhz/model/Qwen3-Embedding-0.6B"
+    tensor_parallel_size: 2
+    gpu_memory_utilization: 0.1
+    trust_remote_code: true
+    max_model_len: 8192
+
+  # LLM 配置（用于运行时调用，使用 OpenAI 格式 API）
+  llm:
+    provider: "openai"
+    model: "qwen3"
+    base_url: "http://localhost:8901/v1"
+    api_key: "123"
+    temperature: 0.1
+    max_tokens: 2000
+    concurrency: 100
+    max_retries: 3
+    timeout: 180.0
+
+  # 嵌入模型配置（用于运行时嵌入向量生成，使用 OpenAI 格式 API）
+  embedding:
+    provider: "openai"
+    model: "qwen3-embedding"
+    base_url: "http://localhost:8902/v1"
+    api_key: "123"
+    temperature: 0.0
+    max_tokens: 8191
+    concurrency: 200
+    max_retries: 3
+    timeout: 600.0
+
+# 图构建配置
+graph:
+  proposition_extraction:
+    temperature: 0.1
+    max_tokens: 2048
+
+  entity_extraction:
+    temperature: 0.1
+    max_tokens: 2048
+
+  rst_analysis:
+    temperature: 0.2
+    max_tokens: 1024
+
+# 实体链接配置
+entity_linking:
+  similarity_threshold: 0.8
+  entity_similarity_threshold: 0.85
+  proposition_similarity_threshold: 0.8
+  vector_top_k: 20
+  entity_fusion_group_size: 20  # 实体融合每组最大数量（LLM判断时拆分大小）
+
+# 检索配置
+retrieval:
+  graph_path: "output/HotpotQA/proposition_graph/linked_graph.pkl"
+  meta_dir: "output/HotpotQA/proposition_graph/meta"
+  index_dir: "output/HotpotQA/search_index"
+
+  # 基础检索配置
+  max_rounds: 5
+  max_path_depth: 6
+  beam_width: 4
+
+  # 评分权重
+  semantic_weight: 0.4
+  bridge_weight: 0.3
+  intent_weight: 0.3  # 意图匹配权重（启用）
+
+  # 终止条件
+  early_stop_threshold: 0.02
+  max_plateau_steps: 2
+
+  # 意图识别配置
+  intent_temperature: 0.3
+  intent_max_tokens: 512
+
+  # ========== Agent 状态机配置（新增）==========
+  # 状态机配置
+  agent_max_rounds: 5
+  agent_max_evidence: 50
+  agent_max_total_hops: 30
+
+  # 锚点队列配置
+  agent_anchor_queue_size: 100
+  agent_anchor_duplicate_threshold: 0.9
+
+  # MAP 阶段配置
+  agent_map_max_iterations: 10
+  agent_map_beam_width: 5
+  agent_map_score_plateau_threshold: 0.02
+  agent_map_score_plateau_window: 2
+
+  # 批量执行配置
+  agent_batch_concurrency: 10
+  agent_top_k_paths: 10
+
+  # ========== 性能优化配置 ==========
+  # 实体名称向量索引配置
+  entity_name_index:
+    enabled: true
+    threshold: 0.7  # 模糊匹配阈值
+    top_k: 5  # 返回候选数量
+
+  # MMR优化配置
+  mmr:
+    max_paths: 50  # 参与MMR计算的最大路径数
+    max_selected: 10  # 最终选择的路径数
+    use_endpoint_similarity: true  # 使用端点相似度（加速）
+
+  # 桥接分数计算配置
+  bridge_score:
+    use_adjacency_cache: true  # 使用邻接缓存加速
+
+  # ========== 双路检索配置 ==========
+  retrieval_proposition_top_k: 10      # 命题检索 top-k
+  retrieval_entity_top_k: 5            # 每个实体的关联命题 top-k
+  retrieval_max_entities: 10           # 最多使用的 related_entities 数量
+  retrieval_entity_enable: true        # 是否启用实体检索路径

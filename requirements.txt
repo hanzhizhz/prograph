@@ -1,0 +1,15 @@
+# ProGraph - 基于原子命题的多跳问答系统
+# Python 依赖包
+
+# 核心依赖
+vllm>=0.2.0                      # 离线大模型推理
+openai>=1.0.0                    # OpenAI API 客户端
+networkx>=3.0                    # 图数据结构和算法
+numpy>=1.24.0                    # 数值计算
+tqdm>=4.65.0                     # 进度条显示
+pyyaml>=6.0                      # YAML 配置文件解析
+hnswlib>=0.7.0                   # 高效向量检索（HNSW 算法）
+
+# 可选依赖
+aiohttp>=3.8.0                   # 异步 HTTP 请求
+tiktoken>=0.5.0                  # Token 计数

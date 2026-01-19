@@ -1,0 +1,290 @@
+[
+  {
+    "dataset": "HotpotQA",
+    "checks": {
+      "duplicate_entities": {
+        "has_duplicates": false,
+        "duplicate_count": 0,
+        "duplicate_groups": []
+      },
+      "edge_connectivity": {
+        "total_nodes": 204377,
+        "total_edges": 272385,
+        "proposition_nodes": 84538,
+        "entity_nodes": 119839,
+        "prop_to_entity_edges": 206144,
+        "prop_to_prop_edges": 66241,
+        "isolated_propositions": 488,
+        "isolated_entities": 0,
+        "orphaned_entities": []
+      },
+      "graph_comparison": {
+        "original_nodes": 204377,
+        "fixed_nodes": 204377,
+        "removed_nodes": 0,
+        "removed_entity_count": 0,
+        "removed_prop_count": 0
+      },
+      "sample_check": [
+        {
+          "entity_id": "hotpot_2789_ent_Brownstone_6",
+          "doc_id": "hotpot_2789",
+          "text": "Brownstone",
+          "entity_type": "CUSTOM",
+          "in_degree": 1,
+          "out_degree": 0,
+          "connected_propositions": [
+            "hotpot_2789_prop_6"
+          ]
+        },
+        {
+          "entity_id": "hotpot_7594_ent_Sen_fout_la_mort_1",
+          "doc_id": "hotpot_7594",
+          "text": "S'en fout la mort",
+          "entity_type": "WORK_OF_ART",
+          "in_degree": 1,
+          "out_degree": 0,
+          "connected_propositions": [
+            "hotpot_7594_prop_1"
+          ]
+        },
+        {
+          "entity_id": "hotpot_9089_ent_John_August_2",
+          "doc_id": "hotpot_9089",
+          "text": "John August",
+          "entity_type": "PERSON",
+          "in_degree": 1,
+          "out_degree": 0,
+          "connected_propositions": [
+            "hotpot_9089_prop_2"
+          ]
+        },
+        {
+          "entity_id": "hotpot_7574_ent_2012_12",
+          "doc_id": "hotpot_7574",
+          "text": "2012",
+          "entity_type": "DATE",
+          "in_degree": 1,
+          "out_degree": 0,
+          "connected_propositions": [
+            "hotpot_7574_prop_12"
+          ]
+        },
+        {
+          "entity_id": "hotpot_7846_ent_younger_generations_7",
+          "doc_id": "hotpot_7846",
+          "text": "younger generations",
+          "entity_type": "PERSON",
+          "in_degree": 1,
+          "out_degree": 0,
+          "connected_propositions": [
+            "hotpot_7846_prop_7"
+          ]
+        }
+      ]
+    },
+    "fix_stats": {
+      "original_nodes": 290682,
+      "original_edges": 272385,
+      "fixed_nodes": 204377,
+      "fixed_edges": 272385,
+      "nodes_removed": 86305,
+      "nodes_kept": 204377
+    }
+  },
+  {
+    "dataset": "2WikiMultihopQA",
+    "checks": {
+      "duplicate_entities": {
+        "has_duplicates": false,
+        "duplicate_count": 0,
+        "duplicate_groups": []
+      },
+      "edge_connectivity": {
+        "total_nodes": 87900,
+        "total_edges": 116960,
+        "proposition_nodes": 37614,
+        "entity_nodes": 50286,
+        "prop_to_entity_edges": 86502,
+        "prop_to_prop_edges": 30458,
+        "isolated_propositions": 147,
+        "isolated_entities": 0,
+        "orphaned_entities": []
+      },
+      "graph_comparison": {
+        "original_nodes": 87900,
+        "fixed_nodes": 87900,
+        "removed_nodes": 0,
+        "removed_entity_count": 0,
+        "removed_prop_count": 0
+      },
+      "sample_check": [
+        {
+          "entity_id": "hotpot_2711_ent_1941_Bowling_Green_Falcons_football_team_0",
+          "doc_id": "hotpot_2711",
+          "text": "1941 Bowling Green Falcons football team",
+          "entity_type": "ORGANIZATION",
+          "in_degree": 7,
+          "out_degree": 0,
+          "connected_propositions": [
+            "hotpot_2711_prop_0",
+            "hotpot_2711_prop_1",
+            "hotpot_2711_prop_2",
+            "hotpot_2711_prop_3",
+            "hotpot_2711_prop_4",
+            "hotpot_2711_prop_5",
+            "hotpot_2711_prop_6"
+          ]
+        },
+        {
+          "entity_id": "hotpot_5001_ent_Master_Naveen_6",
+          "doc_id": "hotpot_5001",
+          "text": "Master Naveen",
+          "entity_type": "PERSON",
+          "in_degree": 1,
+          "out_degree": 0,
+          "connected_propositions": [
+            "hotpot_5001_prop_6"
+          ]
+        },
+        {
+          "entity_id": "hotpot_5132_ent_Tom_Sawyer_vs_Zombies_2",
+          "doc_id": "hotpot_5132",
+          "text": "Tom Sawyer vs Zombies",
+          "entity_type": "WORK_OF_ART",
+          "in_degree": 1,
+          "out_degree": 0,
+          "connected_propositions": [
+            "hotpot_5132_prop_2"
+          ]
+        },
+        {
+          "entity_id": "hotpot_5645_ent_1965_0",
+          "doc_id": "hotpot_5645",
+          "text": "1965",
+          "entity_type": "DATE",
+          "in_degree": 1,
+          "out_degree": 0,
+          "connected_propositions": [
+            "hotpot_5645_prop_0"
+          ]
+        },
+        {
+          "entity_id": "hotpot_1030_ent_James_Dunwoody_Bulloch_5",
+          "doc_id": "hotpot_1030",
+          "text": "James Dunwoody Bulloch",
+          "entity_type": "PERSON",
+          "in_degree": 1,
+          "out_degree": 0,
+          "connected_propositions": [
+            "hotpot_1030_prop_5"
+          ]
+        }
+      ]
+    },
+    "fix_stats": {
+      "original_nodes": 124116,
+      "original_edges": 116960,
+      "fixed_nodes": 87900,
+      "fixed_edges": 116960,
+      "nodes_removed": 36216,
+      "nodes_kept": 87900
+    }
+  },
+  {
+    "dataset": "MuSiQue",
+    "checks": {
+      "duplicate_entities": {
+        "has_duplicates": false,
+        "duplicate_count": 0,
+        "duplicate_groups": []
+      },
+      "edge_connectivity": {
+        "total_nodes": 197036,
+        "total_edges": 258060,
+        "proposition_nodes": 81977,
+        "entity_nodes": 115059,
+        "prop_to_entity_edges": 192597,
+        "prop_to_prop_edges": 65463,
+        "isolated_propositions": 782,
+        "isolated_entities": 0,
+        "orphaned_entities": []
+      },
+      "graph_comparison": {
+        "original_nodes": 197036,
+        "fixed_nodes": 197036,
+        "removed_nodes": 0,
+        "removed_entity_count": 0,
+        "removed_prop_count": 0
+      },
+      "sample_check": [
+        {
+          "entity_id": "hotpot_438_ent_17_14",
+          "doc_id": "hotpot_438",
+          "text": "17",
+          "entity_type": "CUSTOM",
+          "in_degree": 1,
+          "out_degree": 0,
+          "connected_propositions": [
+            "hotpot_438_prop_14"
+          ]
+        },
+        {
+          "entity_id": "hotpot_5627_ent_UEFA_Europa_League_7",
+          "doc_id": "hotpot_5627",
+          "text": "UEFA Europa League",
+          "entity_type": "EVENT",
+          "in_degree": 1,
+          "out_degree": 0,
+          "connected_propositions": [
+            "hotpot_5627_prop_7"
+          ]
+        },
+        {
+          "entity_id": "hotpot_7844_ent_three_branches_2",
+          "doc_id": "hotpot_7844",
+          "text": "three branches",
+          "entity_type": "CUSTOM",
+          "in_degree": 1,
+          "out_degree": 0,
+          "connected_propositions": [
+            "hotpot_7844_prop_2"
+          ]
+        },
+        {
+          "entity_id": "hotpot_8018_ent_Flying_Blind_0",
+          "doc_id": "hotpot_8018",
+          "text": "Flying Blind",
+          "entity_type": "WORK_OF_ART",
+          "in_degree": 4,
+          "out_degree": 0,
+          "connected_propositions": [
+            "hotpot_8018_prop_0",
+            "hotpot_8018_prop_1",
+            "hotpot_8018_prop_2",
+            "hotpot_8018_prop_3"
+          ]
+        },
+        {
+          "entity_id": "hotpot_6109_ent_Fredonia_6",
+          "doc_id": "hotpot_6109",
+          "text": "Fredonia",
+          "entity_type": "LOCATION",
+          "in_degree": 1,
+          "out_degree": 0,
+          "connected_propositions": [
+            "hotpot_6109_prop_6"
+          ]
+        }
+      ]
+    },
+    "fix_stats": {
+      "original_nodes": 274574,
+      "original_edges": 258060,
+      "fixed_nodes": 197036,
+      "fixed_edges": 258060,
+      "nodes_removed": 77538,
+      "nodes_kept": 197036
+    }
+  }
+]
