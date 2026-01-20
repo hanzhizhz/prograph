@@ -15,11 +15,11 @@ cd "$PROJECT_ROOT" || exit 1
 # 创建日志目录
 mkdir -p "$LOG_DIR"
 
-# 数据集配置：图路径|索引输出目录
+# 数据集配置：图路径|持久化数据输出目录
 declare -A DATASETS=(
-    ["HotpotQA"]="output/HotpotQA/proposition_graph/linked_graph.pkl|output/HotpotQA/search_index"
-    ["2WikiMultihopQA"]="output/2WikiMultihopQA/proposition_graph/linked_graph.pkl|output/2WikiMultihopQA/search_index"
-    ["MuSiQue"]="output/MuSiQue/proposition_graph/linked_graph.pkl|output/MuSiQue/search_index"
+    ["HotpotQA"]="output/HotpotQA/proposition_graph/linked_graph.pkl|output/HotpotQA/persistence_data"
+    ["2WikiMultihopQA"]="output/2WikiMultihopQA/proposition_graph/linked_graph.pkl|output/2WikiMultihopQA/persistence_data"
+    ["MuSiQue"]="output/MuSiQue/proposition_graph/linked_graph.pkl|output/MuSiQue/persistence_data"
 )
 
 # 串行处理每个数据集（避免 vLLM embedding 资源竞争）
@@ -72,7 +72,7 @@ echo "所有数据集索引构建完成"
 echo "========================================"
 echo ""
 echo "查看索引统计:"
-echo "  cat output/HotpotQA/search_index/index_stats.json"
-echo "  cat output/2WikiMultihopQA/search_index/index_stats.json"
-echo "  cat output/MuSiQue/search_index/index_stats.json"
+echo "  cat output/HotpotQA/persistence_data/index_stats.json"
+echo "  cat output/2WikiMultihopQA/persistence_data/index_stats.json"
+echo "  cat output/MuSiQue/persistence_data/index_stats.json"
 echo ""

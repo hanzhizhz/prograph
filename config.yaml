@@ -67,9 +67,10 @@ entity_linking:
 
 # 检索配置
 retrieval:
-  graph_path: "output/HotpotQA/proposition_graph/linked_graph.pkl"
-  meta_dir: "output/HotpotQA/proposition_graph/meta"
-  index_dir: "output/HotpotQA/search_index"
+  # 路径配置通过命令行参数传入
+  # graph_path: ""
+  # meta_dir: ""
+  # index_dir: ""
 
   # 基础检索配置
   max_rounds: 5

@@ -9,7 +9,7 @@ PYTHON_ENV="/home/ubuntu/miniconda3/envs/vllm/bin/python"
 PROJECT_ROOT="/data/zhz/git/prograph"
 LOG_DIR="${PROJECT_ROOT}/logs"
 CONFIG_FILE="${PROJECT_ROOT}/config.yaml"
-CONCURRENCY=50  # 并行度
+CONCURRENCY=10  # 并行度
 MAX_SAMPLES=100  # 最大处理样本数
 
 # 切换到项目根目录
@@ -20,9 +20,9 @@ mkdir -p "$LOG_DIR"
 
 # 数据集配置：训练数据路径|图路径|索引目录
 declare -A DATASETS=(
-    ["HotpotQA"]="dataset/HotpotQA/train_data.json|output/HotpotQA/proposition_graph/linked_graph.pkl|output/HotpotQA/proposition_graph"
-    ["2WikiMultihopQA"]="dataset/2WikiMultihopQA/train_data.json|output/2WikiMultihopQA/proposition_graph/linked_graph.pkl|output/2WikiMultihopQA/proposition_graph"
-    ["MuSiQue"]="dataset/MuSiQue/train_data.json|output/MuSiQue/proposition_graph/linked_graph.pkl|output/MuSiQue/proposition_graph"
+    ["HotpotQA"]="dataset/HotpotQA/train_data_filtered.json|output/HotpotQA/proposition_graph/linked_graph.pkl|output/HotpotQA/persistence_data"
+    ["2WikiMultihopQA"]="dataset/2WikiMultihopQA/train_data_filtered.json|output/2WikiMultihopQA/proposition_graph/linked_graph.pkl|output/2WikiMultihopQA/persistence_data"
+    ["MuSiQue"]="dataset/MuSiQue/train_data_filtered.json|output/MuSiQue/proposition_graph/linked_graph.pkl|output/MuSiQue/persistence_data"
 )
 
 # 串行处理每个数据集（数据集之间串行，内部并行）
@@ -63,7 +63,7 @@ for DATASET_NAME in "HotpotQA" "2WikiMultihopQA" "MuSiQue"; do
     if [ ! -d "$INDEX_DIR" ]; then
         echo "警告: $DATASET_NAME 的索引目录不存在，跳过"
         echo "  期望目录: $INDEX_DIR"
-        echo "  请先运行: ./scripts/3-build_all_search_indexes.sh"
+        echo "  请先运行: ./scripts/4-build_all_persistence_data.sh"
         echo ""
         continue
     fi

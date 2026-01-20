@@ -106,7 +106,6 @@ async def initialize_resources(
         cache_file = Path(persistence_dir) / "adjacency_cache.pkl"
         if cache_file.exists():
             try:
-                import pickle
                 with open(cache_file, 'rb') as f:
                     adjacency_cache = pickle.load(f)
                 print(f"✓ 邻接缓存已加载: {len(adjacency_cache)} 个节点")
@@ -144,6 +143,7 @@ async def initialize_resources(
         require_vector_index=False,
         embedding_cache_manager=cache_manager,
         persistence_dir=persistence_dir,
+        index_dir=index_dir,
     )
 
     print("✓ 所有检索组件已初始化（使用 AgentStateMachine）")

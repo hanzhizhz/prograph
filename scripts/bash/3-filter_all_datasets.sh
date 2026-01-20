@@ -50,7 +50,7 @@ for DATASET_NAME in "HotpotQA" "2WikiMultihopQA" "MuSiQue"; do
     LOG_FILE="${LOG_DIR}/${DATASET_NAME}_filter.log"
 
     # 运行过滤脚本
-    $PYTHON_ENV -u "${PROJECT_ROOT}/scripts/2.5-filter_dataset.py" \
+    $PYTHON_ENV -u "${PROJECT_ROOT}/scripts/3-filter_dataset.py" \
         --dataset "$DATASET_PATH" \
         --train-data "$TRAIN_DATA_PATH" \
         --graph "$GRAPH_PATH" \

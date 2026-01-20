@@ -79,9 +79,9 @@ for DATASET_NAME in "HotpotQA" "2WikiMultihopQA" "MuSiQue"; do
     IFS='|' read -r GRAPH_PATH TEMP_DIR OUTPUT_PATH <<< "${DATASETS[$DATASET_NAME]}"
 
     # 检查阶段1输出文件是否存在
-    if [ ! -f "${TEMP_DIR}/entity_candidates.pkl" ] || [ ! -f "${TEMP_DIR}/proposition_candidates.pkl" ]; then
+    if [ ! -f "${TEMP_DIR}/llm_groups.pkl" ] || [ ! -f "${TEMP_DIR}/proposition_candidates.pkl" ]; then
         echo "警告: $DATASET_NAME 的候选对文件不存在，跳过阶段2"
-        echo "  期望文件: ${TEMP_DIR}/entity_candidates.pkl, ${TEMP_DIR}/proposition_candidates.pkl"
+        echo "  期望文件: ${TEMP_DIR}/llm_groups.pkl, ${TEMP_DIR}/proposition_candidates.pkl"
         echo ""
         continue
     fi

@@ -199,11 +199,20 @@ class PathScorer:
 
         try:
             from ..retrieval.vector_index import PersistentHNSWIndex
+            import json
 
-            # 获取向量维度（从嵌入客户端或默认值）
-            # 这里使用 768 作为默认值，实际应从配置获取
-            self._proposition_index = PersistentHNSWIndex(dim=768)
-            self._proposition_index.load(str(index_path))
+            # 从元数据文件读取向量维度
+            meta_path = index_path / f"{index_path.name}.meta.json"
+            if meta_path.exists():
+                with open(meta_path, 'r') as f:
+                    meta_data = json.load(f)
+                    dim = meta_data.get('dim', 768)
+            else:
+                dim = 768  # 默认维度
+
+            self._proposition_index = PersistentHNSWIndex(dim=dim)
+            # load() 方法期望的路径是索引文件的路径（不含扩展名）
+            self._proposition_index.load(str(index_path / index_path.name))
 
             # 预加载所有节点嵌入到缓存
             # 注意：这需要较大的内存，可以根据需要调整
@@ -263,14 +272,17 @@ class PathScorer:
                     self._node_embedding_cache[node_id] = np.array(embedding)
 
             except Exception:
-                # 如果批量 API 失败，回退到单个调用
-                for node_id, text in zip(batch_nodes, batch_texts):
-                    try:
-                        embedding = await self.embedding_client.embed_single(text)
-                        self._node_embedding_cache[node_id] = np.array(embedding)
-                    except Exception:
-                        # 忽略失败的单个调用
-                        pass
+                # 【性能优化】如果批量 API 失败，使用并行重试而不是串行
+                tasks = [
+                    self.embedding_client.embed_single(text)
+                    for text in batch_texts
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                # 缓存成功的结果
+                for node_id, result in zip(batch_nodes, results):
+                    if not isinstance(result, Exception):
+                        self._node_embedding_cache[node_id] = np.array(result)
 
     def _count_mentioned_entities(self, node_id: str) -> int:
         """

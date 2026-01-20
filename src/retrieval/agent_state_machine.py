@@ -56,6 +56,7 @@ class AgentStateMachine:
         require_vector_index: bool = False,
         embedding_cache_manager: Optional[Any] = None,
         persistence_dir: Optional[str] = None,
+        index_dir: Optional[str] = None,
     ):
         self.graph = graph
         self.llm = llm
@@ -64,6 +65,7 @@ class AgentStateMachine:
         self.path_selector = path_selector
         self.embedding_cache_manager = embedding_cache_manager
         self.persistence_dir = persistence_dir
+        self._index_dir = index_dir
 
         # 配置
         self.max_rounds = max_rounds
@@ -912,10 +914,9 @@ Rules for Answer:
 
         try:
             from pathlib import Path
-            from ..config.retrieval_config import get_retrieval_config
 
-            config = get_retrieval_config()
-            index_dir = config.index_dir
+            # 使用构造函数传入的 index_dir，而不是从配置读取
+            index_dir = self._index_dir
 
             if not index_dir:
                 if self._require_vector_index:
@@ -924,7 +925,7 @@ Rules for Answer:
 
             index_path = Path(index_dir) / "indices" / "proposition"
             # 检查索引文件是否存在（.bin 文件）
-            index_file = index_path.parent / f"{index_path.name}.bin"
+            index_file = index_path / f"{index_path.name}.bin"
             if not index_file.exists():
                 if self._require_vector_index:
                     raise RuntimeError(f"配置要求使用向量索引，但索引路径不存在: {index_path}")
@@ -933,7 +934,7 @@ Rules for Answer:
             from .vector_index import PersistentHNSWIndex
 
             # 获取向量维度（从元数据文件读取实际维度）
-            meta_path = index_path.parent / f"{index_path.name}.meta.json"
+            meta_path = index_path / f"{index_path.name}.meta.json"
             if meta_path.exists():
                 import json
                 with open(meta_path, 'r') as f:
@@ -943,7 +944,8 @@ Rules for Answer:
                 dim = 768  # 默认维度
 
             self._proposition_index = PersistentHNSWIndex(dim=dim)
-            self._proposition_index.load(str(index_path))
+            # load() 需要索引文件的路径（不含扩展名），不是目录路径
+            self._proposition_index.load(str(index_path / index_path.name))
             self._vector_index_loaded = True
             return self._proposition_index
 
@@ -1291,7 +1293,9 @@ Rules for Answer:
                 if self.graph.nodes[n].get("node_type") == PROPOSITION_NODE
             ]
 
-            # 计算每个命题与查询的相似度
+            # 【性能优化】先收集所有需要 embedding 的命题文本
+            prop_texts_to_embed = []
+            prop_ids_to_embed = []
             for prop_id in proposition_neighbors:
                 if prop_id not in self.graph or prop_id in all_propositions:
                     continue
@@ -1300,10 +1304,18 @@ Rules for Answer:
                 if not prop_text:
                     continue
 
-                # 计算相似度
-                prop_embedding = np.array(await self.embedding_client.embed_single(prop_text))
-                similarity = self._cosine_similarity(query_embedding, prop_embedding)
-                all_propositions[prop_id] = similarity
+                prop_texts_to_embed.append(prop_text)
+                prop_ids_to_embed.append(prop_id)
+
+            # 【性能优化】批量获取所有 embeddings（一次 API 调用）
+            if prop_texts_to_embed:
+                response = await self.embedding_client.embed(prop_texts_to_embed)
+                prop_embeddings = response.embeddings
+
+                # 计算每个命题与查询的相似度
+                for prop_id, prop_embedding in zip(prop_ids_to_embed, prop_embeddings):
+                    similarity = self._cosine_similarity(query_embedding, np.array(prop_embedding))
+                    all_propositions[prop_id] = similarity
 
         # 按相似度排序
         sorted_props = sorted(all_propositions.items(), key=lambda x: x[1], reverse=True)
@@ -2467,6 +2479,10 @@ Rules for Answer:
 
             new_frontier = set()
             for from_node, to_node, score in all_expansions[:beam_width]:
+                # 【防止循环】跳过已经在子图中的节点
+                if to_node in subgraph.graph:
+                    continue
+
                 # 添加边
                 subgraph.graph.add_edge(from_node, to_node, score=score, step=depth + 1)
                 # 确保节点存在
@@ -2546,6 +2562,10 @@ Rules for Answer:
         all_paths = []
 
         def dfs(current: str, path: List[str]):
+            # 循环检测：防止图中双向边导致无限递归
+            if current in path:
+                return
+
             successors = list(graph.successors(current))
             if not successors:
                 # 叶子节点，保存路径
