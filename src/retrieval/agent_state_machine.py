@@ -603,10 +603,19 @@ class AgentStateMachine:
         # gap_to_anchors 现在是 {gap_id: [节点数据字典列表]}
         validated_gap_to_anchors = {}
         
+        # 【修复】跨gap去重：跟踪全局已分配的节点，避免同一节点被多个gap重复使用
+        global_assigned_nodes = set()
+        
         for gap_id, anchors in gap_to_anchors.items():
             # 过滤出验证通过的锚点（保留完整数据结构）
-            valid_for_gap = [anchor_data for anchor_data in anchors 
-                           if anchor_data['node_id'] in valid_anchor_ids]
+            valid_for_gap = []
+            for anchor_data in anchors:
+                node_id = anchor_data['node_id']
+                # 仅添加验证通过且尚未分配给其他gap的节点
+                if node_id in valid_anchor_ids and node_id not in global_assigned_nodes:
+                    valid_for_gap.append(anchor_data)
+                    global_assigned_nodes.add(node_id)
+            
             validated_gap_to_anchors[gap_id] = valid_for_gap
 
         # 提取ID用于 MapState
