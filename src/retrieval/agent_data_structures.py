@@ -21,10 +21,12 @@ class GapStatus(Enum):
     
     用于跟踪每个信息缺口的探索状态，避免重复无效检索。
     """
-    PENDING = "pending"        # 待探索
-    ACTIVE = "active"          # 正在探索
-    EXHAUSTED = "exhausted"    # 尝试多次无果
-    SATISFIED = "satisfied"    # 已补全
+    PENDING = "pending"                    # 待探索
+    ACTIVE = "active"                      # 正在探索
+    SATISFIED = "satisfied"                # 信息足够，已满足
+    PARTIALLY_SATISFIED = "partially_satisfied"  # 部分满足
+    MANUALLY_CLOSED = "manually_closed"    # 可从外部推理，手动关闭
+    EXHAUSTED = "exhausted"                # 多次尝试无果
 
 
 # ============== 信息缺口检索结果 ==============
@@ -35,12 +37,13 @@ class GapRetrievalResult:
     
     记录每次检索的详细信息，用于指导后续检索策略。
     """
+    gap_id: str                                               # 缺口ID（唯一标识符）
     gap_description: str                                      # 缺口描述
     status: GapStatus = GapStatus.PENDING                     # 当前状态
     attempt_count: int = 0                                    # 尝试次数
     retrieved_docs: List[str] = field(default_factory=list)   # 检索到的所有文档ID
     selected_evidence: List[str] = field(default_factory=list) # 模型选择的证据
-    is_satisfied: bool = False                                # 是否补全
+    is_satisfied: bool = False                                # 是否补全（保留用于兼容性）
     failure_hints: List[str] = field(default_factory=list)    # 失败提示（用于下轮改写）
     last_rewritten_query: str = ""                            # 上次使用的改写查询
     
@@ -49,8 +52,10 @@ class GapRetrievalResult:
         status_desc = {
             GapStatus.PENDING: "待探索",
             GapStatus.ACTIVE: "正在探索",
-            GapStatus.EXHAUSTED: "已耗尽（多次尝试无果）",
-            GapStatus.SATISFIED: "已补全"
+            GapStatus.SATISFIED: "已补全",
+            GapStatus.PARTIALLY_SATISFIED: "部分满足",
+            GapStatus.MANUALLY_CLOSED: "手动关闭",
+            GapStatus.EXHAUSTED: "已耗尽（多次尝试无果）"
         }
         
         context = f"- 缺口: {self.gap_description}\n"
@@ -77,6 +82,7 @@ class InfoGap:
 
     PLAN 阶段输出的信息缺口，描述需要查找的信息、关联实体、意图标签等。
     """
+    gap_id: str                   # 唯一标识符（如 "gap_1", "gap_2"）
     gap_description: str          # 需要查找的信息
     related_entities: List[str]   # 关联实体
     intent_label: str             # 意图标签（自由文本，不再限制为枚举值）
@@ -94,7 +100,8 @@ class InfoGap:
     
     def is_exhausted(self, max_attempts: int = 2) -> bool:
         """检查是否已耗尽（超过最大尝试次数且未满足）"""
-        return self.attempt_count >= max_attempts and self.status != GapStatus.SATISFIED
+        satisfied_statuses = {GapStatus.SATISFIED, GapStatus.PARTIALLY_SATISFIED, GapStatus.MANUALLY_CLOSED}
+        return self.attempt_count >= max_attempts and self.status not in satisfied_statuses
     
     def mark_active(self):
         """标记为正在探索"""
@@ -104,6 +111,14 @@ class InfoGap:
     def mark_satisfied(self):
         """标记为已补全"""
         self.status = GapStatus.SATISFIED
+    
+    def mark_partially_satisfied(self):
+        """标记为部分满足"""
+        self.status = GapStatus.PARTIALLY_SATISFIED
+    
+    def mark_manually_closed(self):
+        """标记为手动关闭"""
+        self.status = GapStatus.MANUALLY_CLOSED
     
     def mark_exhausted(self):
         """标记为已耗尽"""
@@ -119,7 +134,7 @@ class PlanResult:
     info_gaps: List[InfoGap]                    # 识别的信息缺口列表
     summary: str = ""                           # 意图识别摘要
     visited_entities: Set[str] = field(default_factory=set)  # 已访问的实体集合
-    current_knowledge: List[str] = field(default_factory=list)  # 当前已知信息
+    current_knowledge: List[Dict[str, Any]] = field(default_factory=list)  # 当前已知信息（文档列表）
 
     def get_active_edges(self) -> Set[str]:
         """获取所有激活的边类型"""
@@ -150,7 +165,7 @@ class MapState:
     visited_entities: Set[str] = field(default_factory=set)  # 本轮访问的实体
     avg_score: float = 0.0  # 本轮平均分数
 
-    # 按 InfoGap 分组的叶子节点（使用 gap_description 作为键）
+    # 按 InfoGap 分组的叶子节点（使用 gap_id 作为键）
     leaf_nodes_by_gap: Dict[str, List[str]] = field(default_factory=dict)
 
     # 新增：MAP阶段收集的文档详细信息列表 [{doc_id, title, content}]
@@ -171,7 +186,7 @@ class RoundTrace:
     plan_result: Optional[PlanResult]      # PLAN 结果
     anchor_count: int                      # 锚点数量
     map_iterations: int                    # MAP 迭代次数
-    evidence_count: int                    # 收集的证据数量
+    document_count: int                    # 收集的文档数量
     decision: str                          # 关键决策
 
     # 新增：动作历史详情
@@ -197,7 +212,7 @@ class RoundTrace:
         if self.termination_reason:
             context += f"- Termination: {self.termination_reason}\n"
 
-        context += f"- Evidence collected: {self.evidence_count}\n"
+        context += f"- Documents collected: {self.document_count}\n"
 
         return context
 
@@ -367,7 +382,6 @@ class AgentResult:
     short_answer: str = ""               # 适合 EM/F1 的简短答案
     confidence: float = 0.0              # 置信度
     trace_log: Optional[TraceLog] = None # 完整追踪日志
-    collected_evidence: List[str] = field(default_factory=list)        # 收集的所有证据
     final_documents: List[Dict[str, Any]] = field(default_factory=list) # 最终引用的文档
     final_paths: List['RankedPath'] = field(default_factory=list)      # 最终的 top-k 路径
     termination_reason: str = ""         # 终止原因
@@ -380,7 +394,6 @@ class AgentResult:
             "confidence": self.confidence,
             "termination_reason": self.termination_reason,
             "trace_summary": self.trace_log.get_summary() if self.trace_log else {},
-            "evidence_count": len(self.collected_evidence),
             "doc_count": len(self.final_documents),
             "top_docs": self.final_documents,
             "path_count": len(self.final_paths)

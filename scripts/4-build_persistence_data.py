@@ -10,6 +10,7 @@ import json
 import sys
 from pathlib import Path
 from collections import defaultdict
+from typing import Optional
 import argparse
 import numpy as np
 
@@ -19,6 +20,87 @@ from src.llm import VLLMEmbeddingClient
 from src.config.model_config import ModelConfig
 from src.config import set_model_config
 from src.retrieval.vector_index import PersistentHNSWIndex
+
+
+def load_doc_titles_from_dataset(dataset_path: str) -> dict:
+    """
+    从原始数据文件加载文档标题映射
+    
+    Args:
+        dataset_path: 数据集文件路径
+        
+    Returns:
+        {doc_id: title} 映射字典
+    """
+    doc_titles = {}
+    dataset_file = Path(dataset_path)
+    
+    if not dataset_file.exists():
+        return doc_titles
+    
+    try:
+        with open(dataset_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        # 根据数据集类型推断 doc_id 前缀
+        if "HotpotQA" in str(dataset_file) or "hotpotqa" in str(dataset_file).lower():
+            prefix = "hotpot"
+        elif "2WikiMultihopQA" in str(dataset_file) or "2wiki" in str(dataset_file).lower():
+            prefix = "2wiki"
+        elif "MuSiQue" in str(dataset_file) or "musique" in str(dataset_file).lower():
+            prefix = "musique"
+        else:
+            prefix = "doc"
+        
+        # 构建 doc_id 到 title 的映射
+        for idx, item in enumerate(data):
+            doc_id = f"{prefix}_{idx}"
+            title = item.get("title", "")
+            if title:
+                doc_titles[doc_id] = title
+        
+        print(f"  从数据集文件加载了 {len(doc_titles)} 个文档标题")
+    except Exception as e:
+        print(f"  警告: 无法从数据集文件加载标题: {e}")
+    
+    return doc_titles
+
+
+def find_dataset_file(graph_path: str) -> Optional[str]:
+    """
+    根据图路径推断原始数据集文件路径
+    
+    Args:
+        graph_path: 图文件路径
+        
+    Returns:
+        数据集文件路径，如果无法推断则返回 None
+    """
+    graph_file = Path(graph_path)
+    
+    # 尝试从路径中提取数据集名称
+    path_parts = graph_file.parts
+    dataset_name = None
+    
+    for part in path_parts:
+        if part in ["HotpotQA", "2WikiMultihopQA", "MuSiQue"]:
+            dataset_name = part
+            break
+    
+    if not dataset_name:
+        return None
+    
+    # 尝试多个可能的路径
+    possible_paths = [
+        f"dataset/{dataset_name}/full_docs_filtered.json",
+        f"dataset/{dataset_name}/full_docs.json",
+    ]
+    
+    for path in possible_paths:
+        if Path(path).exists():
+            return path
+    
+    return None
 
 
 def build_adjacency_cache(graph):
@@ -308,15 +390,31 @@ async def build_persistence_data(
     doc_metadata = {}
     doc_titles = {}  # 收集文档标题
 
-    # 首先收集所有文档标题
+    # 首先从图节点收集文档标题
     for node_id, data in graph.nodes(data=True):
         if data.get("node_type") == "proposition":
             doc_id = data.get("doc_id", "")
             if doc_id:
                 # 尝试从节点获取标题
-                title = data.get("doc_title", "")
+                title = data.get("title", "")
                 if title and doc_id not in doc_titles:
                     doc_titles[doc_id] = title
+
+    # 如果从图中无法获取足够的标题，尝试从原始数据集文件加载
+    missing_titles = set(doc_to_props.keys()) | set(doc_to_ents.keys()) - set(doc_titles.keys())
+    if missing_titles:
+        print(f"  从图中获取了 {len(doc_titles)} 个标题，缺失 {len(missing_titles)} 个")
+        print("  尝试从原始数据集文件加载标题...")
+        dataset_file = find_dataset_file(graph_path)
+        if dataset_file:
+            dataset_titles = load_doc_titles_from_dataset(dataset_file)
+            # 合并数据集中的标题（优先使用图中已有的）
+            for doc_id, title in dataset_titles.items():
+                if doc_id not in doc_titles and title:
+                    doc_titles[doc_id] = title
+            print(f"  从数据集文件补充了 {len([d for d in missing_titles if d in doc_titles])} 个标题")
+        else:
+            print("  警告: 无法找到原始数据集文件，部分文档将使用 doc_id 作为标题")
 
     # 构建文档元数据
     for doc_id in set(list(doc_to_props.keys()) + list(doc_to_ents.keys())):

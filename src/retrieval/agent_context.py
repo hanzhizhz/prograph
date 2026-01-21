@@ -4,7 +4,7 @@ Agent 上下文
 定义基于状态图驱动的多跳问答系统的运行时上下文。
 """
 
-from typing import List, Set, Optional, Dict
+from typing import List, Set, Optional, Dict, Any
 from dataclasses import dataclass, field
 import networkx as nx
 
@@ -26,7 +26,7 @@ class AgentContext:
     max_rounds: int = 5                    # 最大轮数
 
     # ========== 检索状态 ==========
-    collected_evidence: List[str] = field(default_factory=list)
+    context_documents: List[Dict[str, Any]] = field(default_factory=list)  # 文档级上下文记忆
     visited_entities: Set[str] = field(default_factory=set)
 
     # ========== MAP 阶段状态 ==========
@@ -45,10 +45,10 @@ class AgentContext:
 
     # ========== 信息缺口历史 ==========
     gap_history: Dict[str, GapRetrievalResult] = field(default_factory=dict)
-    # key = gap_description, value = 该缺口的累计检索结果
+    # key = gap_id, value = 该缺口的累计检索结果
 
     # ========== 配置 ==========
-    max_evidence: int = 50
+    max_documents: int = 20  # 最大文档数量
     max_gap_attempts: int = 2  # 单个缺口最大尝试次数
 
     def can_continue_round(self) -> bool:
@@ -59,27 +59,30 @@ class AgentContext:
         """进入下一轮"""
         self.current_round += 1
 
-    def add_evidence(self, evidence: List[str]):
-        """添加证据
-
+    def add_documents(self, docs: List[Dict[str, Any]]):
+        """添加文档到上下文记忆（去重）
+        
         Args:
-            evidence: 证据列表
+            docs: 文档列表，每个文档包含 doc_id, title, content
         """
-        self.collected_evidence.extend(evidence)
-        # 限制证据数量
-        if len(self.collected_evidence) > self.max_evidence:
-            self.collected_evidence = self.collected_evidence[-self.max_evidence:]
+        existing_ids = {d["doc_id"] for d in self.context_documents}
+        
+        for doc in docs:
+            if doc["doc_id"] not in existing_ids:
+                self.context_documents.append(doc)
+                existing_ids.add(doc["doc_id"])
+        
+        # 限制文档数量
+        if len(self.context_documents) > self.max_documents:
+            self.context_documents = self.context_documents[-self.max_documents:]
 
-    def get_recent_evidence(self, count: int = 20) -> List[str]:
-        """获取最近的证据
-
-        Args:
-            count: 获取数量
-
+    def get_context_documents(self) -> List[Dict[str, Any]]:
+        """获取所有上下文文档（不限制数量）
+            
         Returns:
-            最近的证据列表
+            文档列表
         """
-        return self.collected_evidence[-count:] if self.collected_evidence else []
+        return self.context_documents
 
     def transition_to(self, new_state: AgentState):
         """转换到新状态
@@ -91,29 +94,29 @@ class AgentContext:
 
     # ========== 信息缺口管理方法 ==========
     
-    def get_gap_status(self, gap_description: str) -> Optional[GapStatus]:
+    def get_gap_status(self, gap_id: str) -> Optional[GapStatus]:
         """获取指定缺口的状态
         
         Args:
-            gap_description: 缺口描述
+            gap_id: 缺口ID
             
         Returns:
             缺口状态，如果不存在则返回 None
         """
-        if gap_description in self.gap_history:
-            return self.gap_history[gap_description].status
+        if gap_id in self.gap_history:
+            return self.gap_history[gap_id].status
         return None
     
-    def get_gap_result(self, gap_description: str) -> Optional[GapRetrievalResult]:
+    def get_gap_result(self, gap_id: str) -> Optional[GapRetrievalResult]:
         """获取指定缺口的检索结果
         
         Args:
-            gap_description: 缺口描述
+            gap_id: 缺口ID
             
         Returns:
             检索结果，如果不存在则返回 None
         """
-        return self.gap_history.get(gap_description)
+        return self.gap_history.get(gap_id)
     
     def update_gap_result(self, result: GapRetrievalResult):
         """更新缺口的检索结果
@@ -121,32 +124,32 @@ class AgentContext:
         Args:
             result: 检索结果
         """
-        self.gap_history[result.gap_description] = result
+        self.gap_history[result.gap_id] = result
     
-    def is_gap_exhausted(self, gap_description: str) -> bool:
+    def is_gap_exhausted(self, gap_id: str) -> bool:
         """检查缺口是否已耗尽
         
         Args:
-            gap_description: 缺口描述
+            gap_id: 缺口ID
             
         Returns:
             是否已耗尽
         """
-        result = self.gap_history.get(gap_description)
+        result = self.gap_history.get(gap_id)
         if result is None:
             return False
         return result.status == GapStatus.EXHAUSTED
     
-    def is_gap_satisfied(self, gap_description: str) -> bool:
+    def is_gap_satisfied(self, gap_id: str) -> bool:
         """检查缺口是否已补全
         
         Args:
-            gap_description: 缺口描述
+            gap_id: 缺口ID
             
         Returns:
             是否已补全
         """
-        result = self.gap_history.get(gap_description)
+        result = self.gap_history.get(gap_id)
         if result is None:
             return False
         return result.status == GapStatus.SATISFIED
@@ -222,7 +225,7 @@ class AgentContext:
         question: str,
         graph: nx.DiGraph,
         max_rounds: int = 5,
-        max_evidence: int = 50,
+        max_documents: int = 20,
         max_gap_attempts: int = 2
     ) -> 'AgentContext':
         """创建 Agent 上下文
@@ -231,7 +234,7 @@ class AgentContext:
             question: 问题
             graph: 图
             max_rounds: 最大轮数
-            max_evidence: 最大证据数量
+            max_documents: 最大文档数量
             max_gap_attempts: 单个缺口最大尝试次数
 
         Returns:
@@ -247,7 +250,7 @@ class AgentContext:
             graph=graph,
             anchor_queue=AnchorQueue(graph),
             trace_log=TraceLog(question=question),
-            max_evidence=max_evidence,
+            max_documents=max_documents,
             max_gap_attempts=max_gap_attempts
         )
 

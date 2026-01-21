@@ -18,7 +18,7 @@ CHECK_PLAN_PROMPT = """你是一个专业的多跳问答系统。请判断当前
 **问题：**
 {question}
 
-**已收集的证据（来自原始文档，最近 {evidence_count} 条）：**
+**已收集的上下文文档：**
 {evidence}
 
 **已访问实体：**
@@ -60,6 +60,7 @@ CHECK_PLAN_PROMPT = """你是一个专业的多跳问答系统。请判断当前
   "rationale": "判断理由",
   "info_gaps": [
     {{
+      "gap_id": "gap_1",
       "gap_description": "需要查找的具体信息",
       "related_entities": ["实体1", "实体2"],
       "intent_label": "自定义意图描述（如 Trace_Process, Find_Reason, Expand_Detail, Check_Conflict 等）",
@@ -71,7 +72,7 @@ CHECK_PLAN_PROMPT = """你是一个专业的多跳问答系统。请判断当前
 ```
 
 **要求：**
-1. 如果证据包含问题的直接答案，设置 can_answer=true
+1. 如果文档内容包含问题的直接答案，设置 can_answer=true
 2. intent_label 用于记录推理意图（自由描述，不受限制）
 3. active_edges 从 SKELETON 和 DETAIL 中选择，可以组合使用
 4. 根据信息缺口的类型选择最合适的探索路径组合
@@ -87,8 +88,10 @@ GAP_HISTORY_SECTION = """**历史缺口状态：**
 **缺口状态说明：**
 - 待探索(PENDING)：尚未开始检索
 - 正在探索(ACTIVE)：已尝试但未补全，可参考失败提示改进
+- 已补全(SATISFIED)：信息足够，已满足
+- 部分满足(PARTIALLY_SATISFIED)：检索到部分相关信息，但不完整
+- 手动关闭(MANUALLY_CLOSED)：虽未直接找到信息，但可通过现有信息推理得出
 - 已耗尽(EXHAUSTED)：多次尝试无果，不应再次提出相同描述
-- 已补全(SATISFIED)：已找到足够信息
 
 **重要提醒：**
 - 不要重复提出与"已耗尽"状态缺口相同或高度相似的 gap_description
@@ -99,24 +102,22 @@ GAP_HISTORY_SECTION = """**历史缺口状态：**
 
 def get_check_plan_prompt(
     question: str,
-    evidence: List[str],
+    documents: List[str],
     visited_entities: set,
-    evidence_count: int = 20,
     gap_history: str = ""
 ) -> str:
     """生成 CHECK_PLAN 阶段的 Prompt
 
     Args:
         question: 问题
-        evidence: 证据列表
+        documents: 格式化的文档内容列表
         visited_entities: 已访问实体集合
-        evidence_count: 证据数量
         gap_history: 历史缺口状态信息
 
     Returns:
         Prompt 字符串
     """
-    evidence_text = "\n".join(f"- {e}" for e in evidence[-evidence_count:])
+    evidence_text = "\n".join(documents)
     entities_text = ", ".join(visited_entities) if visited_entities else "无"
     
     # 构建历史缺口状态部分
@@ -129,7 +130,6 @@ def get_check_plan_prompt(
         question=question,
         evidence=evidence_text,
         visited_entities=entities_text,
-        evidence_count=evidence_count,
         gap_history_section=gap_history_section
     )
 
@@ -405,26 +405,24 @@ DOC_EXTRACT_PROMPT = """你是一个专业的信息提取专家。请从检索�
 
 def get_extract_from_docs_prompt(
     question: str,
-    docs: List[Dict[str, Any]],
-    max_docs: int = 5
+    docs: List[Dict[str, Any]]
 ) -> str:
     """生成信息提取 Prompt（基于文档）
 
     Args:
         question: 问题
         docs: 文档列表
-        max_docs: 最大文档数
 
     Returns:
         Prompt 字符串
     """
     docs_text = ""
-    for i, doc in enumerate(docs[:max_docs]):
+    for i, doc in enumerate(docs):
         doc_id = doc.get("doc_id", f"doc_{i}")
         title = doc.get("title", "未知标题")
-        content = doc.get("content", "")[:1000]  # 提取时可以放宽一点长度
+        content = doc.get("content", "")
         docs_text += f"\n[{i+1}] {title} (ID: {doc_id})\n{content}\n"
-
+    
     if not docs_text:
         docs_text = "无检索到的文档"
 
@@ -482,8 +480,7 @@ def get_gap_satisfaction_prompt(
     question: str,
     gap_description: str,
     related_entities: List[str],
-    retrieved_docs: List[Dict[str, Any]],
-    max_docs: int = 5
+    retrieved_docs: List[Dict[str, Any]]
 ) -> str:
     """生成缺口补全评估 Prompt
 
@@ -492,7 +489,6 @@ def get_gap_satisfaction_prompt(
         gap_description: 信息缺口描述
         related_entities: 关联实体列表
         retrieved_docs: 检索到的文档列表
-        max_docs: 最大文档数
 
     Returns:
         Prompt 字符串
@@ -501,10 +497,10 @@ def get_gap_satisfaction_prompt(
     
     # 格式化文档
     docs_text = ""
-    for i, doc in enumerate(retrieved_docs[:max_docs]):
+    for i, doc in enumerate(retrieved_docs):
         doc_id = doc.get("doc_id", f"doc_{i}")
         title = doc.get("title", "未知标题")
-        content = doc.get("content", "")[:800]  # 评估时也保持一定长度
+        content = doc.get("content", "")
         docs_text += f"\n[{i+1}] {title} (ID: {doc_id})\n{content}\n"
     
     if not docs_text:
@@ -515,6 +511,108 @@ def get_gap_satisfaction_prompt(
         gap_description=gap_description,
         related_entities=entities_text,
         retrieved_docs=docs_text
+    )
+
+
+# ============== 统一评估与选择 Prompt ==============
+
+UNIFIED_EVALUATE_PROMPT = """你是一个专业的信息检索评估专家。请评估检索到的文档对所有信息缺口的满足情况，并选择需要添加到上下文记忆的文档。
+
+**原始问题：**
+{question}
+
+**当前信息缺口列表：**
+{intent_list}
+
+**已有上下文文档：**
+{existing_docs}
+
+**本轮检索到的文档（共{doc_count}个）：**
+{documents}
+
+**任务：**
+1. 评估每个信息缺口是否被当前检索到的文档满足，并选择合适的状态
+2. 对于状态为 continue 的缺口，给出下一步检索建议
+3. 选择需要添加到上下文记忆的文档（选择对回答问题有价值的文档，包括对原始问题有帮助但不一定满足特定意图的文档，避免与已有文档冗余）
+
+**输出格式：**
+```json
+{{
+  "intent_evaluation": [
+    {{
+      "gap_id": "gap_1",
+      "intent_label": "意图标签",
+      "gap_description": "缺口描述",
+      "status": "satisfied|partially_satisfied|manually_closed|continue",
+      "reason": "判断理由",
+      "next_hint": "下一步检索提示（仅 continue 时）"
+    }}
+  ],
+  "docs_to_add": ["doc_id_1", "doc_id_2"],
+  "add_reason": "选择这些文档的理由"
+}
+```
+
+**状态选项说明：**
+- satisfied：检索到的信息完全满足该缺口
+- partially_satisfied：检索到部分相关信息，但不完整
+- manually_closed：虽未直接找到信息，但可通过现有信息推理得出，建议关闭
+- continue：信息不足，需要继续检索
+
+**评估标准：**
+- status=satisfied：检索到的文档中包含了能够完全填补该信息缺口的关键信息
+- status=partially_satisfied：检索到部分相关信息，但不完整，可能需要继续检索
+- status=manually_closed：虽未直接找到信息，但可通过现有信息推理得出，建议关闭该缺口
+- status=continue：检索到的文档与信息缺口无关，或信息不足以填补缺口，需要继续检索
+- docs_to_add：选择对回答问题最有价值的文档（包括对原始问题有帮助但不一定满足特定意图的文档），不需要区分它们属于哪个意图
+- 避免选择与已有上下文文档重复的内容
+"""
+
+
+def get_unified_evaluate_prompt(
+    question: str,
+    intent_list: str,
+    existing_docs: List[Dict[str, Any]],
+    retrieved_docs: List[Dict[str, Any]]
+) -> str:
+    """生成统一评估与选择 Prompt
+    
+    Args:
+        question: 原始问题
+        intent_list: 格式化的信息缺口列表
+        existing_docs: 已有的上下文文档
+        retrieved_docs: 本轮检索到的文档
+        
+    Returns:
+        Prompt 字符串
+    """
+    # 格式化已有文档
+    existing_text = ""
+    if existing_docs:
+        for i, doc in enumerate(existing_docs):  # 显示所有已有文档
+            doc_id = doc.get("doc_id", f"doc_{i}")
+            title = doc.get("title", "未知标题")
+            existing_text += f"[{i+1}] {title} (ID: {doc_id})\n"
+    else:
+        existing_text = "无"
+    
+    # 格式化本轮检索到的文档
+    docs_text = ""
+    for i, doc in enumerate(retrieved_docs):
+        doc_id = doc.get("doc_id", f"doc_{i}")
+        title = doc.get("title", "未知标题")
+        content = doc.get("content", "")  # 不限制长度
+        docs_text += f"\n[{i+1}] {title} (ID: {doc_id})\n{content}\n"
+    
+    if not docs_text:
+        docs_text = "无检索到的文档"
+    
+    return UNIFIED_EVALUATE_PROMPT.format(
+        question=question,
+        intent_list=intent_list,
+        existing_docs=existing_text,
+        documents=docs_text,
+        doc_count=len(retrieved_docs)
     )
 
 
@@ -551,21 +649,19 @@ ANSWER_GENERATE_PROMPT = """你是一个专业的问答助手。请根据收集�
 def get_answer_prompt(
     question: str,
     evidence: List[str],
-    history: str,
-    max_evidence: int = 30
+    history: str
 ) -> str:
     """生成答案生成 Prompt
 
     Args:
         question: 问题
-        evidence: 证据列表
+        evidence: 证据列表（即文档格式化的内容）
         history: 探索历史
-        max_evidence: 最大证据数
 
     Returns:
         Prompt 字符串
     """
-    evidence_text = "\n".join(f"- {e}" for e in evidence[-max_evidence:])
+    evidence_text = "\n".join(evidence)
 
     return ANSWER_GENERATE_PROMPT.format(
         question=question,

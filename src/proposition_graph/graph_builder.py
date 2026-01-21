@@ -106,6 +106,7 @@ class GraphBuilder:
                 node_type=PROPOSITION_NODE,
                 text=prop.text,
                 doc_id=doc_id,
+                title=document.title,
                 sent_idx=prop.sent_idx,
                 prop_idx=prop.prop_idx
             )
@@ -215,6 +216,7 @@ class GraphBuilder:
                     node_type=PROPOSITION_NODE,
                     text=prop.text,
                     doc_id=doc_id,
+                    title=doc.title,
                     sent_idx=prop.sent_idx,
                     prop_idx=prop.prop_idx
                 )
