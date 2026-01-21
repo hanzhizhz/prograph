@@ -14,6 +14,61 @@ import networkx as nx
 from .agent_states import AgentState
 
 
+# ============== 信息缺口状态枚举 ==============
+
+class GapStatus(Enum):
+    """信息缺口状态枚举
+    
+    用于跟踪每个信息缺口的探索状态，避免重复无效检索。
+    """
+    PENDING = "pending"        # 待探索
+    ACTIVE = "active"          # 正在探索
+    EXHAUSTED = "exhausted"    # 尝试多次无果
+    SATISFIED = "satisfied"    # 已补全
+
+
+# ============== 信息缺口检索结果 ==============
+
+@dataclass
+class GapRetrievalResult:
+    """单个意图缺口的检索结果
+    
+    记录每次检索的详细信息，用于指导后续检索策略。
+    """
+    gap_description: str                                      # 缺口描述
+    status: GapStatus = GapStatus.PENDING                     # 当前状态
+    attempt_count: int = 0                                    # 尝试次数
+    retrieved_docs: List[str] = field(default_factory=list)   # 检索到的所有文档ID
+    selected_evidence: List[str] = field(default_factory=list) # 模型选择的证据
+    is_satisfied: bool = False                                # 是否补全
+    failure_hints: List[str] = field(default_factory=list)    # 失败提示（用于下轮改写）
+    last_rewritten_query: str = ""                            # 上次使用的改写查询
+    
+    def to_prompt_context(self) -> str:
+        """转换为 Prompt 上下文格式"""
+        status_desc = {
+            GapStatus.PENDING: "待探索",
+            GapStatus.ACTIVE: "正在探索",
+            GapStatus.EXHAUSTED: "已耗尽（多次尝试无果）",
+            GapStatus.SATISFIED: "已补全"
+        }
+        
+        context = f"- 缺口: {self.gap_description}\n"
+        context += f"  状态: {status_desc.get(self.status, '未知')}\n"
+        context += f"  尝试次数: {self.attempt_count}\n"
+        
+        if self.retrieved_docs:
+            context += f"  检索到的文档数: {len(self.retrieved_docs)}\n"
+        
+        if self.failure_hints:
+            context += f"  失败提示: {'; '.join(self.failure_hints)}\n"
+        
+        if self.last_rewritten_query:
+            context += f"  上次查询: {self.last_rewritten_query}\n"
+        
+        return context
+
+
 # ============== 信息缺口结构 ==============
 
 @dataclass
@@ -27,10 +82,32 @@ class InfoGap:
     intent_label: str             # 意图标签（自由文本，不再限制为枚举值）
     active_edges: List[str]       # 激活的边类型
     rewritten_query: str = ""     # 改写后的查询文本（用于检索优化）
+    
+    # 新增：状态跟踪字段
+    status: GapStatus = GapStatus.PENDING   # 当前状态
+    attempt_count: int = 0                   # 尝试次数
+    last_retrieval_result: Optional['GapRetrievalResult'] = None  # 上次检索结果
 
     def get_active_edges(self) -> Set[str]:
         """获取激活的边类型"""
         return set(self.active_edges)
+    
+    def is_exhausted(self, max_attempts: int = 2) -> bool:
+        """检查是否已耗尽（超过最大尝试次数且未满足）"""
+        return self.attempt_count >= max_attempts and self.status != GapStatus.SATISFIED
+    
+    def mark_active(self):
+        """标记为正在探索"""
+        self.status = GapStatus.ACTIVE
+        self.attempt_count += 1
+    
+    def mark_satisfied(self):
+        """标记为已补全"""
+        self.status = GapStatus.SATISFIED
+    
+    def mark_exhausted(self):
+        """标记为已耗尽"""
+        self.status = GapStatus.EXHAUSTED
 
 
 @dataclass
@@ -76,7 +153,8 @@ class MapState:
     # 按 InfoGap 分组的叶子节点（使用 gap_description 作为键）
     leaf_nodes_by_gap: Dict[str, List[str]] = field(default_factory=dict)
 
-    # 新增：MAP阶段收集的文档ID列表（按路径分数排序，去重）
+    # 新增：MAP阶段收集的文档详细信息列表 [{doc_id, title, content}]
+    top_docs: List[Dict[str, Any]] = field(default_factory=list)
     top_doc_ids: List[str] = field(default_factory=list)
 
 
@@ -286,12 +364,13 @@ class AgentResult:
     包含生成的答案、置信度、追踪日志、证据和路径等信息。
     """
     answer: str                          # 生成的答案
-    short_answer: str                    # 适合 EM/F1 的简短答案
-    confidence: float                    # 置信度
-    trace_log: TraceLog                  # 完整追踪日志
-    collected_evidence: List[str]        # 收集的所有证据
-    final_paths: List['RankedPath']      # 最终的 top-k 路径
-    termination_reason: str              # 终止原因
+    short_answer: str = ""               # 适合 EM/F1 的简短答案
+    confidence: float = 0.0              # 置信度
+    trace_log: Optional[TraceLog] = None # 完整追踪日志
+    collected_evidence: List[str] = field(default_factory=list)        # 收集的所有证据
+    final_documents: List[Dict[str, Any]] = field(default_factory=list) # 最终引用的文档
+    final_paths: List['RankedPath'] = field(default_factory=list)      # 最终的 top-k 路径
+    termination_reason: str = ""         # 终止原因
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典格式"""
@@ -300,8 +379,10 @@ class AgentResult:
             "short_answer": self.short_answer,
             "confidence": self.confidence,
             "termination_reason": self.termination_reason,
-            "trace_summary": self.trace_log.get_summary(),
+            "trace_summary": self.trace_log.get_summary() if self.trace_log else {},
             "evidence_count": len(self.collected_evidence),
+            "doc_count": len(self.final_documents),
+            "top_docs": self.final_documents,
             "path_count": len(self.final_paths)
         }
 

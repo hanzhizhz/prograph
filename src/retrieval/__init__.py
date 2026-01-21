@@ -18,7 +18,7 @@ from .agent_state_machine import AgentStateMachine
 from .agent_batch_executor import AgentBatchExecutor
 from .agent_prompts import (
     get_check_plan_prompt, get_anchor_judge_prompt,
-    get_extract_prompt, get_answer_prompt
+    get_extract_from_docs_prompt, get_answer_prompt
 )
 
 __all__ = [
@@ -43,6 +43,6 @@ __all__ = [
     # Prompts
     "get_check_plan_prompt",
     "get_anchor_judge_prompt",
-    "get_extract_prompt",
+    "get_extract_from_docs_prompt",
     "get_answer_prompt",
 ]

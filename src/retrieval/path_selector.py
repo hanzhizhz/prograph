@@ -37,7 +37,6 @@ class PathSelector:
     def select(
         self,
         paths: List[Union[SubgraphRankedPath, Path]],
-        top_k: int = 5,
     ) -> List[SubgraphRankedPath]:
         """
         选择最优路径
@@ -63,11 +62,11 @@ class PathSelector:
         reranked_paths = self._mmr_rerank(unified_paths)
 
         # 更新 top-k 路径的 metadata（避免创建新对象）
-        for path in reranked_paths[:top_k]:
+        for path in reranked_paths:
             path.metadata['document_coverage'] = self._get_document_coverage(path)
             path.metadata['diversity_score'] = 0.0  # TODO: 计算
 
-        return reranked_paths[:top_k]
+        return reranked_paths
 
     def _unify_paths(
         self,

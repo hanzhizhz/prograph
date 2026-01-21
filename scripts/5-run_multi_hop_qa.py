@@ -200,6 +200,7 @@ async def initialize_resources(
         persistence_dir=persistence_dir,
         index_dir=index_dir,
         enable_timing=True,
+        top_k_docs=retrieval_config.agent_top_k_docs,
         adjacency_cache=adjacency_cache,            # 传入预加载的邻接缓存
         predecessors_cache=predecessors_cache,      # 传入预加载的前驱缓存
         proposition_index=proposition_index,        # 传入预加载的命题索引
@@ -328,6 +329,7 @@ async def run_batch(
                     "answer": result.answer,
                     "short_answer": result.short_answer,
                     "reference_answer": item.get("answer", ""),
+                    "top_docs": result.final_documents,
                 }
 
             except Exception as e:

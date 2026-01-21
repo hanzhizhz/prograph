@@ -71,6 +71,12 @@ class RetrievalConfig:
     # 批量执行配置
     agent_batch_concurrency: int = 10
     agent_top_k_paths: int = 10
+    agent_top_k_docs: int = 5
+
+    # ========== 信息缺口状态管理配置 ==========
+    max_gap_attempts: int = 2                       # 单个缺口最大尝试次数
+    gap_similarity_threshold: float = 0.85          # 缺口相似度阈值（防止微调描述绕过去重）
+    enable_gap_evaluation: bool = True              # 是否启用缺口补全评估
 
     # ========== 双路检索配置 ==========
     retrieval_proposition_top_k: int = 10      # 命题检索 top-k
@@ -116,6 +122,11 @@ class RetrievalConfig:
             agent_map_score_plateau_window=config.get('agent_map_score_plateau_window', cls.agent_map_score_plateau_window),
             agent_batch_concurrency=config.get('agent_batch_concurrency', cls.agent_batch_concurrency),
             agent_top_k_paths=config.get('agent_top_k_paths', cls.agent_top_k_paths),
+            agent_top_k_docs=config.get('agent_top_k_docs', cls.agent_top_k_docs),
+            # 信息缺口状态管理配置
+            max_gap_attempts=config.get('max_gap_attempts', cls.max_gap_attempts),
+            gap_similarity_threshold=config.get('gap_similarity_threshold', cls.gap_similarity_threshold),
+            enable_gap_evaluation=config.get('enable_gap_evaluation', cls.enable_gap_evaluation),
             # 双路检索配置
             retrieval_proposition_top_k=config.get('retrieval_proposition_top_k', cls.retrieval_proposition_top_k),
             retrieval_entity_top_k=config.get('retrieval_entity_top_k', cls.retrieval_entity_top_k),

@@ -9,7 +9,7 @@ PYTHON_ENV="/home/ubuntu/miniconda3/envs/vllm/bin/python"
 PROJECT_ROOT="/data/zhz/git/prograph"
 LOG_DIR="${PROJECT_ROOT}/logs"
 CONFIG_FILE="${PROJECT_ROOT}/config.yaml"
-CONCURRENCY=10  # 并行度
+CONCURRENCY=1  # 并行度
 MAX_SAMPLES=100  # 最大处理样本数
 
 # 切换到项目根目录

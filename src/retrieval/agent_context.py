@@ -4,12 +4,12 @@ Agent 上下文
 定义基于状态图驱动的多跳问答系统的运行时上下文。
 """
 
-from typing import List, Set, Optional
+from typing import List, Set, Optional, Dict
 from dataclasses import dataclass, field
 import networkx as nx
 
 from .agent_states import AgentState
-from .agent_data_structures import MapState, TraceLog, AnchorQueue
+from .agent_data_structures import MapState, TraceLog, AnchorQueue, GapStatus, GapRetrievalResult
 
 
 @dataclass
@@ -43,8 +43,13 @@ class AgentContext:
     # ========== PLAN 结果 ==========
     plan_result: Optional['PlanResult'] = None  # 当前轮的 PLAN 结果
 
+    # ========== 信息缺口历史 ==========
+    gap_history: Dict[str, GapRetrievalResult] = field(default_factory=dict)
+    # key = gap_description, value = 该缺口的累计检索结果
+
     # ========== 配置 ==========
     max_evidence: int = 50
+    max_gap_attempts: int = 2  # 单个缺口最大尝试次数
 
     def can_continue_round(self) -> bool:
         """是否可以继续下一轮"""
@@ -84,13 +89,141 @@ class AgentContext:
         """
         self.current_state = new_state
 
+    # ========== 信息缺口管理方法 ==========
+    
+    def get_gap_status(self, gap_description: str) -> Optional[GapStatus]:
+        """获取指定缺口的状态
+        
+        Args:
+            gap_description: 缺口描述
+            
+        Returns:
+            缺口状态，如果不存在则返回 None
+        """
+        if gap_description in self.gap_history:
+            return self.gap_history[gap_description].status
+        return None
+    
+    def get_gap_result(self, gap_description: str) -> Optional[GapRetrievalResult]:
+        """获取指定缺口的检索结果
+        
+        Args:
+            gap_description: 缺口描述
+            
+        Returns:
+            检索结果，如果不存在则返回 None
+        """
+        return self.gap_history.get(gap_description)
+    
+    def update_gap_result(self, result: GapRetrievalResult):
+        """更新缺口的检索结果
+        
+        Args:
+            result: 检索结果
+        """
+        self.gap_history[result.gap_description] = result
+    
+    def is_gap_exhausted(self, gap_description: str) -> bool:
+        """检查缺口是否已耗尽
+        
+        Args:
+            gap_description: 缺口描述
+            
+        Returns:
+            是否已耗尽
+        """
+        result = self.gap_history.get(gap_description)
+        if result is None:
+            return False
+        return result.status == GapStatus.EXHAUSTED
+    
+    def is_gap_satisfied(self, gap_description: str) -> bool:
+        """检查缺口是否已补全
+        
+        Args:
+            gap_description: 缺口描述
+            
+        Returns:
+            是否已补全
+        """
+        result = self.gap_history.get(gap_description)
+        if result is None:
+            return False
+        return result.status == GapStatus.SATISFIED
+    
+    def get_active_gaps(self) -> List[GapRetrievalResult]:
+        """获取所有活跃状态的缺口
+        
+        Returns:
+            活跃缺口列表
+        """
+        return [
+            result for result in self.gap_history.values()
+            if result.status == GapStatus.ACTIVE
+        ]
+    
+    def get_exhausted_gaps(self) -> List[GapRetrievalResult]:
+        """获取所有耗尽状态的缺口
+        
+        Returns:
+            耗尽缺口列表
+        """
+        return [
+            result for result in self.gap_history.values()
+            if result.status == GapStatus.EXHAUSTED
+        ]
+    
+    def get_gap_history_prompt(self) -> str:
+        """生成缺口历史的 Prompt 上下文
+        
+        Returns:
+            格式化的缺口历史字符串
+        """
+        if not self.gap_history:
+            return "无历史缺口记录"
+        
+        context = ""
+        for gap_desc, result in self.gap_history.items():
+            context += result.to_prompt_context() + "\n"
+        
+        return context.strip()
+    
+    def find_similar_gap(self, gap_description: str, threshold: float = 0.85) -> Optional[GapRetrievalResult]:
+        """查找与给定描述相似的历史缺口
+        
+        简单实现：基于词集合的 Jaccard 相似度
+        
+        Args:
+            gap_description: 缺口描述
+            threshold: 相似度阈值
+            
+        Returns:
+            相似的历史缺口结果，如果没有则返回 None
+        """
+        def jaccard_similarity(s1: str, s2: str) -> float:
+            """计算两个字符串的 Jaccard 相似度"""
+            set1 = set(s1.lower().split())
+            set2 = set(s2.lower().split())
+            if not set1 or not set2:
+                return 0.0
+            intersection = len(set1 & set2)
+            union = len(set1 | set2)
+            return intersection / union if union > 0 else 0.0
+        
+        for existing_desc, result in self.gap_history.items():
+            if jaccard_similarity(gap_description, existing_desc) >= threshold:
+                return result
+        
+        return None
+
     @classmethod
     def create(
         cls,
         question: str,
         graph: nx.DiGraph,
         max_rounds: int = 5,
-        max_evidence: int = 50
+        max_evidence: int = 50,
+        max_gap_attempts: int = 2
     ) -> 'AgentContext':
         """创建 Agent 上下文
 
@@ -99,6 +232,7 @@ class AgentContext:
             graph: 图
             max_rounds: 最大轮数
             max_evidence: 最大证据数量
+            max_gap_attempts: 单个缺口最大尝试次数
 
         Returns:
             Agent 上下文实例
@@ -113,7 +247,8 @@ class AgentContext:
             graph=graph,
             anchor_queue=AnchorQueue(graph),
             trace_log=TraceLog(question=question),
-            max_evidence=max_evidence
+            max_evidence=max_evidence,
+            max_gap_attempts=max_gap_attempts
         )
 
 

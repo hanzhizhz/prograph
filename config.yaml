@@ -109,6 +109,7 @@ retrieval:
   # 批量执行配置
   agent_batch_concurrency: 10
   agent_top_k_paths: 10
+  agent_top_k_docs: 5
 
   # ========== 性能优化配置 ==========
   # 实体名称向量索引配置

@@ -190,15 +190,20 @@ S(v) = w1 * S_sem(v) + w2 * S_bridge(v) + w3 * S_intent(v)
 | **向量索引** | HNSW 索引检索 | 100x+ 初始锚点检索 |
 | **内存优化** | 避免不必要的拷贝 | 减少内存分配 |
 
-## 意图标签
+## 意图标签与边类型
 
-| 意图 | 激活的边类型 |
-|------|-------------|
-| Trace_Process | NEXT_EVENT, SEQUENCE |
-| Find_Reason | CAUSED_BY, MOTIVATION |
-| Expand_Detail | ELABORATION, BACKGROUND |
-| Bridge_Entity | MENTIONS_ENTITY |
-| Check_Conflict | CONTRAST, CONCESSION |
+系统通过意图标签动态选择探索路径（active_edges）：
+
+| 意图标签 | 含义 | 激活的边类型 (active_edges) |
+|---------|------|---------------------------|
+| Trace_Process | 追踪事件发展、时序流程 | SKELETON |
+| Find_Reason | 寻找原因、动机 | DETAIL |
+| Expand_Detail | 扩展背景、详细说明 | DETAIL |
+| Check_Conflict | 检查矛盾、转折对比 | SKELETON |
+
+**注意**：
+- `active_edges` 仅控制 SKELETON 和 DETAIL 边的使用
+- SIMILARITY（相似边）和 MENTIONS_ENTITY（包含边）始终可用，不受限制
 
 ## 图结构
 
@@ -208,9 +213,24 @@ S(v) = w1 * S_sem(v) + w2 * S_bridge(v) + w3 * S_intent(v)
 - **global_entity**：全局实体节点（链接后）
 
 ### 边类型
-- **骨架边**（Nucleus-Nucleus）：SEQUENCE, CONTRAST, CONCESSION
-- **细节边**（Nucleus-Satellite）：CAUSED_BY, MOTIVATION, ELABORATION, BACKGROUND
-- **包含边**：MENTIONS_ENTITY（命题 → 实体）
+
+系统使用四种边类型连接命题节点：
+
+1. **SKELETON（骨架边）** - Nucleus-Nucleus 关系，两个命题同等重要
+   - 具体类型：SEQUENCE, CONTRAST, CONCESSION
+   - 用途：追踪事件发展、检查矛盾转折
+
+2. **DETAIL（细节边）** - Nucleus-Satellite 关系，主从依赖
+   - 具体类型：CAUSED_BY, MOTIVATION, ELABORATION, BACKGROUND
+   - 用途：寻找原因动机、扩展背景细节
+
+3. **SIMILARITY（相似边）** - 跨文档语义相似的软连接
+   - 用途：发现相关主题、跨文档关联
+   - 特性：始终可用，不受 active_edges 限制
+
+4. **MENTIONS_ENTITY（包含边）** - 命题到实体的提及关系
+   - 用途：通过实体跳转到相关命题
+   - 特性：双向边，始终可用，不受 active_edges 限制
 
 ## 支持的数据集
 

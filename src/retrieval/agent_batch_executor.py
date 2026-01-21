@@ -79,10 +79,8 @@ class AgentBatchExecutor:
                 # 创建一个失败结果
                 processed_results.append(AgentResult(
                     answer=f"处理失败: {str(result)}",
+                    short_answer="error",
                     confidence=0.0,
-                    trace_log=None,
-                    collected_evidence=[],
-                    final_paths=[],
                     termination_reason="error"
                 ))
             else:

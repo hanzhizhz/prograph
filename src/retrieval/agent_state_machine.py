@@ -15,11 +15,12 @@ from .agent_states import AgentState
 from .agent_context import AgentContext
 from .agent_data_structures import (
     InfoGap, PlanResult, MapState, TraceLog,
-    RoundTrace, AnchorQueue, AgentResult
+    RoundTrace, AnchorQueue, AgentResult,
+    GapStatus, GapRetrievalResult
 )
 from .agent_prompts import (
     get_check_plan_prompt, get_anchor_judge_prompt,
-    get_extract_prompt
+    get_extract_from_docs_prompt, get_gap_satisfaction_prompt
 )
 from .path_scorer import PathScorer, NodeScore
 from .path_structures import Path
@@ -59,6 +60,7 @@ class AgentStateMachine:
         persistence_dir: Optional[str] = None,
         index_dir: Optional[str] = None,
         enable_timing: bool = True,
+        top_k_docs: int = 5,
         # 【单例优化】预加载的资源参数
         adjacency_cache: Optional[Dict[str, Dict[str, List[Dict[str, Any]]]]] = None,
         predecessors_cache: Optional[Dict[str, List[str]]] = None,
@@ -82,6 +84,7 @@ class AgentStateMachine:
         self.map_max_iterations = map_max_iterations
         self.map_score_plateau_threshold = map_score_plateau_threshold
         self.map_score_plateau_window = map_score_plateau_window
+        self.top_k_docs = top_k_docs
 
         # 【性能优化】向量索引配置
         self._require_vector_index = require_vector_index
@@ -133,6 +136,36 @@ class AgentStateMachine:
             index_path=index_path,
             dim=None  # 自动从元数据获取维度
         )
+
+        # 【资源加载】加载节点映射和文档元数据
+        self._node_mappings: Dict[str, Any] = {}
+        self._doc_metadata: Dict[str, Any] = {}
+        self._load_mappings_and_metadata()
+
+    def _load_mappings_and_metadata(self):
+        """加载节点映射和文档元数据"""
+        if not self.persistence_dir:
+            return
+
+        from pathlib import Path
+        mapping_file = Path(self.persistence_dir) / "node_mappings.json"
+        meta_file = Path(self.persistence_dir) / "doc_metadata.json"
+
+        if mapping_file.exists():
+            try:
+                with open(mapping_file, 'r', encoding='utf-8') as f:
+                    self._node_mappings = json.load(f)
+                print(f"✓ 节点映射已加载: {len(self._node_mappings.get('doc_to_propositions', {}))} 个文档")
+            except Exception as e:
+                print(f"警告: 节点映射加载失败 ({e})")
+
+        if meta_file.exists():
+            try:
+                with open(meta_file, 'r', encoding='utf-8') as f:
+                    self._doc_metadata = json.load(f)
+                print(f"✓ 文档元数据已加载: {len(self._doc_metadata)} 个文档")
+            except Exception as e:
+                print(f"警告: 文档元数据加载失败 ({e})")
 
     async def run(
         self,
@@ -223,8 +256,10 @@ class AgentStateMachine:
 
                 elif state == AgentState.RETRIEVE:
                     with self.timing_logger.time(f"Round {context.current_round + 1} - RETRIEVE"):
-                        valid_anchors = await self._state_retrieve(context)
-                    if not valid_anchors:
+                        gap_to_anchors = await self._state_retrieve(context)
+                    # 统计所有有效锚点总数
+                    total_anchors = sum(len(anchors) for anchors in gap_to_anchors.values())
+                    if not gap_to_anchors or total_anchors == 0:
                         if self._verbose:
                             print(f"  RETRIEVE: 未找到有效锚点，终止")
                         context.transition_to(AgentState.ANSWER)
@@ -232,7 +267,13 @@ class AgentStateMachine:
                         break
                     else:
                         if self._verbose:
-                            print(f"  RETRIEVE: 获得 {len(valid_anchors)} 个有效锚点")
+                            print(f"  RETRIEVE: 获得 {total_anchors} 个有效锚点，分布在 {len(gap_to_anchors)} 个信息缺口")
+                            # 显示每个gap的锚点信息
+                            for gap_desc, anchors in gap_to_anchors.items():
+                                print(f"    Gap: {gap_desc}")
+                                print(f"      锚点数量: {len(anchors)}")
+                                for anchor_data in anchors:  # 显示每个gap的前2个锚点
+                                    print(f"      • {anchor_data.get('text', '')}")
 
                         # 注意：MapState 已在 _state_retrieve 中创建，不需要重复创建
                         context.transition_to(AgentState.MAP)
@@ -288,9 +329,10 @@ class AgentStateMachine:
                 confidence=0.7,  # 可以从 answer_generator 中获取
                 trace_log=context.trace_log,
                 collected_evidence=context.collected_evidence,
+                final_documents=context.map_state.top_docs if context.map_state else [],
                 final_paths=[],  # 可以从 context.accumulated_paths 中生成
-            termination_reason=termination_reason
-        )
+                termination_reason=termination_reason
+            )
 
     async def _state_check_plan(self, context: AgentContext) -> bool:
         """CHECK_PLAN: 判断可答性并识别信息缺口
@@ -303,16 +345,24 @@ class AgentStateMachine:
             bool: 是否可以回答
         """
         recent_evidence = context.get_recent_evidence(20)
+        
+        # 获取历史缺口状态信息
+        gap_history = context.get_gap_history_prompt()
 
         if self._debug:
             print(f"    [DEBUG] CHECK_PLAN 输入: {len(recent_evidence)} 条证据, {len(context.visited_entities)} 个实体")
+            if context.gap_history:
+                print(f"    [DEBUG] 历史缺口数: {len(context.gap_history)}")
+                for gap_desc, result in context.gap_history.items():
+                    print(f"      - {gap_desc[:40]}... : {result.status.value}, attempts={result.attempt_count}")
 
-        # 生成 prompt
+        # 生成 prompt（包含历史缺口状态）
         prompt = get_check_plan_prompt(
             question=context.question,
             evidence=recent_evidence,
             visited_entities=context.visited_entities,
-            evidence_count=20
+            evidence_count=20,
+            gap_history=gap_history
         )
 
         try:
@@ -339,13 +389,32 @@ class AgentStateMachine:
                 for gap_data in result.get("info_gaps", []):
                     # 意图标签现在使用自由文本，不再限制为枚举值
                     intent_label_str = gap_data.get("intent_label", "Bridge_Entity")
-
-                    info_gaps.append(InfoGap(
-                        gap_description=gap_data.get("gap_description", ""),
+                    gap_description = gap_data.get("gap_description", "")
+                    
+                    # 检查是否与历史缺口相似
+                    similar_gap = context.find_similar_gap(gap_description)
+                    
+                    # 如果找到相似的已耗尽缺口，跳过该缺口
+                    if similar_gap and similar_gap.status == GapStatus.EXHAUSTED:
+                        if self._debug:
+                            print(f"    [DEBUG] 跳过已耗尽的相似缺口: {gap_description[:40]}...")
+                        continue
+                    
+                    # 如果找到相似的活跃缺口，继承其状态
+                    new_gap = InfoGap(
+                        gap_description=gap_description,
                         related_entities=gap_data.get("related_entities", []),
                         intent_label=intent_label_str,
                         active_edges=gap_data.get("active_edges", [])
-                    ))
+                    )
+                    
+                    if similar_gap:
+                        # 继承历史状态
+                        new_gap.status = similar_gap.status
+                        new_gap.attempt_count = similar_gap.attempt_count
+                        new_gap.last_retrieval_result = similar_gap
+                    
+                    info_gaps.append(new_gap)
 
                 # 存储 PlanResult
                 context.plan_result = PlanResult(
@@ -358,7 +427,8 @@ class AgentStateMachine:
                 if self._verbose:
                     print(f"  CHECK_PLAN: 识别 {len(info_gaps)} 个信息缺口")
                     for gap in info_gaps:
-                        print(f"    - {gap.gap_description} [{gap.intent_label}] active_edges={gap.active_edges}")
+                        status_str = f"[{gap.status.value}]" if gap.status != GapStatus.PENDING else ""
+                        print(f"    - {gap.gap_description} [{gap.intent_label}] {status_str} active_edges={gap.active_edges}")
 
             return can_answer
 
@@ -370,30 +440,57 @@ class AgentStateMachine:
     async def _rewrite_queries(
         self,
         question: str,
-        info_gaps: List[InfoGap]
+        info_gaps: List[InfoGap],
+        context: Optional[AgentContext] = None
     ) -> List[str]:
         """使用 LLM 改写查询文本
 
         Args:
             question: 原始问题
             info_gaps: 信息缺口列表
+            context: Agent 上下文（用于获取重试信息）
 
         Returns:
             List[改写后的查询]，按 info_gaps 顺序对应
         """
-        from .agent_prompts import get_query_rewrite_prompt
+        from .agent_prompts import get_query_rewrite_prompt, get_query_rewrite_retry_prompt
 
         if not info_gaps:
             return []
 
-        # 生成 prompt
-        prompt = get_query_rewrite_prompt(question, info_gaps)
+        # 检查是否有重试缺口
+        retry_info = {}
+        if context:
+            for i, gap in enumerate(info_gaps):
+                # 检查该缺口是否有历史记录
+                gap_result = context.get_gap_result(gap.gap_description)
+                if gap_result and gap_result.attempt_count > 0:
+                    retry_info[i] = {
+                        "last_query": gap_result.last_rewritten_query,
+                        "failure_hints": gap_result.failure_hints,
+                        "retrieved_docs": gap_result.retrieved_docs
+                    }
+                # 也检查相似缺口
+                elif gap.attempt_count > 0 and gap.last_retrieval_result:
+                    retry_info[i] = {
+                        "last_query": gap.last_retrieval_result.last_rewritten_query,
+                        "failure_hints": gap.last_retrieval_result.failure_hints,
+                        "retrieved_docs": gap.last_retrieval_result.retrieved_docs
+                    }
+
+        # 根据是否有重试缺口选择不同的 prompt
+        if retry_info:
+            prompt = get_query_rewrite_retry_prompt(question, info_gaps, retry_info)
+            if self._debug:
+                print(f"    [DEBUG] QUERY_REWRITE: 使用增强版 prompt，{len(retry_info)} 个重试缺口")
+        else:
+            prompt = get_query_rewrite_prompt(question, info_gaps)
 
         try:
             messages = [{"role": "user", "content": prompt}]
             response = await self.llm.generate(
                 messages=messages,
-                temperature=0.1,  # 低温以保持稳定性
+                temperature=0.1 if not retry_info else 0.3,  # 重试时稍高温度以增加多样性
                 max_tokens=512
             )
 
@@ -417,7 +514,8 @@ class AgentStateMachine:
             if self._debug:
                 print(f"    [DEBUG] QUERY_REWRITE: 改写了 {len(rewritten_list)} 个查询")
                 for i, (gap, query) in enumerate(zip(info_gaps, rewritten_list)):
-                    print(f"      [{i}] {gap.gap_description[:40]}... → {query}")
+                    is_retry = "[重试]" if i in retry_info else ""
+                    print(f"      [{i}] {is_retry} {gap.gap_description[:40]}... → {query}")
 
             return rewritten_list
 
@@ -426,19 +524,24 @@ class AgentStateMachine:
             # 失败时返回原始缺口描述
             return [gap.gap_description for gap in info_gaps]
 
-    async def _state_retrieve(self, context: AgentContext) -> List[str]:
+    async def _state_retrieve(self, context: AgentContext) -> Dict[str, List[Dict]]:
         """RETRIEVE: 按意图分组并行检索锚点
 
         1. 使用 LLM 改写查询（基于当前 info_gaps）
         2. 按意图分组并行检索锚点
         3. LLM 验证并创建/更新 MapState
+        
+        Returns:
+            Dict[str, List[Dict]]: gap_description -> 验证通过的锚点节点数据列表
+                每个节点数据字典包含: node_id, text, node_type, doc_id 等属性
         """
         from .agent_data_structures import MapState
 
-        # 1. 查询改写（保持现有逻辑）
+        # 1. 查询改写（传入 context 以支持重试缺口的增强改写）
         rewritten_queries = await self._rewrite_queries(
             question=context.question,
-            info_gaps=context.plan_result.info_gaps
+            info_gaps=context.plan_result.info_gaps,
+            context=context
         )
 
         for i, gap in enumerate(context.plan_result.info_gaps):
@@ -454,21 +557,22 @@ class AgentStateMachine:
                 use_rewritten_queries=True
             )
 
-        # 3. 收集所有锚点用于后续处理
+        # 3. 收集所有锚点用于后续处理（从节点数据字典中提取ID）
         all_anchors = []
         for anchors in gap_to_anchors.values():
-            all_anchors.extend(anchors)
+            for anchor_data in anchors:
+                all_anchors.append(anchor_data['node_id'])
 
         # 去重
         seen = set()
         unique_anchors = []
-        for anchor in all_anchors:
-            if anchor not in seen:
-                seen.add(anchor)
-                unique_anchors.append(anchor)
+        for anchor_id in all_anchors:
+            if anchor_id not in seen:
+                seen.add(anchor_id)
+                unique_anchors.append(anchor_id)
 
         if not unique_anchors:
-            return []
+            return {}
 
         # 4. 对锚点按优先级排序（保持现有逻辑）
         prioritized_anchors = await self._prioritize_anchors(
@@ -479,30 +583,37 @@ class AgentStateMachine:
 
         # 5. LLM 验证锚点（保持现有逻辑）
         with self.timing_logger.time("  LLM: Validate anchors"):
-            valid_anchors = await self._validate_anchors(context, prioritized_anchors)
+            valid_anchor_ids = await self._validate_anchors(context, prioritized_anchors)
 
         # 6. 创建或更新 MapState（按意图分组）
         # 对于本轮的每个 InfoGap，保留验证通过的锚点
-        # gap_to_anchors 现在是 {gap_description: [anchors]}
-        current_leaf_nodes_by_gap = {}
+        # gap_to_anchors 现在是 {gap_description: [节点数据字典列表]}
+        validated_gap_to_anchors = {}
+        
         for gap_desc, anchors in gap_to_anchors.items():
-            valid_for_gap = [a for a in anchors if a in valid_anchors]
-            current_leaf_nodes_by_gap[gap_desc] = valid_for_gap
+            # 过滤出验证通过的锚点（保留完整数据结构）
+            valid_for_gap = [anchor_data for anchor_data in anchors 
+                           if anchor_data['node_id'] in valid_anchor_ids]
+            validated_gap_to_anchors[gap_desc] = valid_for_gap
+
+        # 提取ID用于 MapState
+        validated_ids_by_gap = {gap: [a['node_id'] for a in anchors] 
+                               for gap, anchors in validated_gap_to_anchors.items()}
 
         # 如果存在上一轮的 leaf_nodes_by_gap，合并（增量式探索）
         if context.map_state and context.map_state.leaf_nodes_by_gap:
             merged_leaf_nodes_by_gap = {}
             # 合并上一轮和本轮的结果
-            all_gap_descriptions = set(context.map_state.leaf_nodes_by_gap.keys()) | set(current_leaf_nodes_by_gap.keys())
+            all_gap_descriptions = set(context.map_state.leaf_nodes_by_gap.keys()) | set(validated_ids_by_gap.keys())
             for gap_desc in all_gap_descriptions:
                 prev_nodes = context.map_state.leaf_nodes_by_gap.get(gap_desc, [])
-                curr_nodes = current_leaf_nodes_by_gap.get(gap_desc, [])
+                curr_nodes = validated_ids_by_gap.get(gap_desc, [])
                 merged = list(set(prev_nodes + curr_nodes))
                 merged_leaf_nodes_by_gap[gap_desc] = merged
 
             # 创建新 MapState，继承上一轮的状态
             context.map_state = MapState(
-                initial_nodes=list(set(context.prev_leaf_nodes + valid_anchors)),
+                initial_nodes=list(set(context.prev_leaf_nodes + valid_anchor_ids)),
                 explored_paths=[],
                 top_paths=[],
                 visited_entities=set(),
@@ -512,22 +623,25 @@ class AgentStateMachine:
         else:
             # 首次创建 MapState
             if self._debug:
-                print(f"    [DEBUG] RETRIEVE: 首次创建 MapState, leaf_nodes_by_gap={current_leaf_nodes_by_gap}")
+                print(f"    [DEBUG] RETRIEVE: 首次创建 MapState")
             context.map_state = MapState(
                 initial_nodes=[],
                 explored_paths=[],
                 top_paths=[],
                 visited_entities=set(),
                 avg_score=0.0,
-                leaf_nodes_by_gap=current_leaf_nodes_by_gap
+                leaf_nodes_by_gap=validated_ids_by_gap
             )
 
         if self._debug:
-            print(f"    [DEBUG] RETRIEVE: {len(valid_anchors)} 个有效锚点, {len(current_leaf_nodes_by_gap)} 个分组")
-            for gap_desc, nodes in current_leaf_nodes_by_gap.items():
-                print(f"      - {gap_desc[:30]}... : {len(nodes)} nodes")
+            print(f"    [DEBUG] RETRIEVE: {len(valid_anchor_ids)} 个有效锚点, {len(validated_gap_to_anchors)} 个分组")
+            for gap_desc, nodes in validated_gap_to_anchors.items():
+                print(f"      - Gap: {gap_desc}")
+                print(f"        锚点数量: {len(nodes)}")
+                for node_data in nodes[:3]:  # 显示前3个节点
+                    print(f"        * [{node_data['node_id']}] {node_data.get('text', '')}")
 
-        return valid_anchors
+        return validated_gap_to_anchors
 
     async def _prioritize_anchors(
         self,
@@ -718,21 +832,10 @@ class AgentStateMachine:
             reverse=True
         )
 
-        # 步骤3：收集文档ID（去重）
-        top_k_doc_ids = self._collect_documents_from_paths(sorted_paths, self.map_beam_width)
-
-        if self._debug:
-            print(f"  MAP: 收集了 {len(top_k_doc_ids)} 个去重文档")
-            for doc_id in top_k_doc_ids[:5]:
-                print(f"    - {doc_id}")
-
-        # 步骤4：更新 map_state（直接使用 RankedPath，无需转换）
+        # 步骤3：更新 map_state（直接使用 RankedPath，无需转换）
         map_state.explored_paths = sorted_paths
         map_state.top_paths = sorted_paths[:self.map_beam_width]
         map_state.avg_score = sum(rp.normalized_score for rp in sorted_paths) / len(sorted_paths) if sorted_paths else 0.0
-
-        # 保存收集的文档ID列表
-        map_state.top_doc_ids = top_k_doc_ids
 
         # 更新叶子节点（用于下一轮）
         map_state.leaf_nodes = [p.nodes[-1] for p in map_state.top_paths if p.nodes]
@@ -743,7 +846,7 @@ class AgentStateMachine:
             map_state.visited_entities.update(subgraph.visited_entities)
 
     async def _state_update(self, context: AgentContext):
-        """UPDATE: 路径级打分排序，提取有用信息"""
+        """UPDATE: 路径级打分排序，提取有用信息，评估缺口补全状态"""
         if not context.map_state or not context.map_state.explored_paths:
             return
 
@@ -751,7 +854,6 @@ class AgentStateMachine:
         with self.timing_logger.time("  Path ranking"):
             ranked_paths = self.path_selector.select(
                 context.map_state.explored_paths,
-                top_k=10
             )
 
         context.accumulated_paths.extend(ranked_paths)
@@ -759,9 +861,50 @@ class AgentStateMachine:
         if self._debug:
             print(f"    [DEBUG] UPDATE: 排序后路径 {len(ranked_paths)} 条")
 
-        # 提取证据
+        # 提取文档信息
+        with self.timing_logger.time("  Document mapping"):
+            top_docs = []
+            seen_docs = set()
+            for path in ranked_paths:
+                for node_id in path.nodes:
+                    if node_id in self.graph.nodes:
+                        doc_id = self.graph.nodes[node_id].get("doc_id", "")
+                        if doc_id and doc_id not in seen_docs:
+                            seen_docs.add(doc_id)
+                            # 获取标题
+                            title = self._doc_metadata.get(doc_id, {}).get("title", doc_id)
+                            # 重建内容
+                            content = self._reconstruct_document(doc_id)
+                            top_docs.append({
+                                "doc_id": doc_id,
+                                "title": title,
+                                "content": content
+                            })
+                            if len(top_docs) >= self.top_k_docs:
+                                break
+                if len(top_docs) >= self.top_k_docs:
+                    break
+            
+            context.map_state.top_docs = top_docs
+            context.map_state.top_doc_ids = [d["doc_id"] for d in top_docs]
+
+        # ======== 新增：按意图缺口分组评估补全状态 ========
+        with self.timing_logger.time("  Gap satisfaction evaluation"):
+            await self._evaluate_all_gaps(context, ranked_paths, top_docs)
+
+        # 提取证据（现在使用缺口评估的结果）
         with self.timing_logger.time("  Evidence extraction"):
-            extracted = await self._extract_evidence(context, ranked_paths)
+            # 收集所有缺口评估中选中的证据
+            all_selected_evidence = []
+            for gap_result in context.gap_history.values():
+                if gap_result.selected_evidence:
+                    all_selected_evidence.extend(gap_result.selected_evidence)
+            
+            # 如果缺口评估没有提取到证据，则使用传统方法
+            if not all_selected_evidence:
+                extracted = await self._extract_evidence(context, top_docs)
+            else:
+                extracted = all_selected_evidence
 
         if self._debug:
             print(f"    [DEBUG] UPDATE: LLM 提取证据 {len(extracted)} 条")
@@ -779,6 +922,211 @@ class AgentStateMachine:
                 embedding_client=self.embedding_client,
                 top_k_per_entity=3
             )
+
+    async def _evaluate_all_gaps(
+        self,
+        context: AgentContext,
+        ranked_paths: List[RankedPath],
+        top_docs: List[Dict[str, Any]]
+    ):
+        """评估所有当前轮次的信息缺口补全状态
+        
+        Args:
+            context: Agent 上下文
+            ranked_paths: 排序后的路径
+            top_docs: 检索到的文档
+        """
+        if not context.plan_result or not context.plan_result.info_gaps:
+            return
+        
+        # 按意图标签分组路径
+        paths_by_intent = self._group_paths_by_intent(ranked_paths)
+        
+        # 按意图标签分组文档
+        docs_by_intent = self._group_docs_by_intent(ranked_paths, top_docs)
+        
+        # 并行评估每个缺口
+        evaluation_tasks = []
+        for gap in context.plan_result.info_gaps:
+            # 获取该缺口对应的路径和文档
+            gap_paths = paths_by_intent.get(gap.intent_label, [])
+            gap_docs = docs_by_intent.get(gap.intent_label, [])
+            
+            # 如果没有路径，使用所有路径作为备选
+            if not gap_paths:
+                gap_paths = ranked_paths[:5]
+            if not gap_docs:
+                gap_docs = top_docs[:3]
+            
+            task = self._evaluate_gap_satisfaction(context, gap, gap_docs, gap_paths)
+            evaluation_tasks.append(task)
+        
+        # 并行执行
+        await asyncio.gather(*evaluation_tasks, return_exceptions=True)
+
+    def _group_paths_by_intent(self, paths: List[RankedPath]) -> Dict[str, List[RankedPath]]:
+        """按意图标签分组路径"""
+        result = {}
+        for path in paths:
+            intent = path.intent_label or "unknown"
+            if intent not in result:
+                result[intent] = []
+            result[intent].append(path)
+        return result
+
+    def _group_docs_by_intent(
+        self,
+        paths: List[RankedPath],
+        docs: List[Dict[str, Any]]
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """按意图标签分组文档"""
+        # 建立 doc_id -> doc 的映射
+        doc_map = {d["doc_id"]: d for d in docs}
+        
+        result = {}
+        for path in paths:
+            intent = path.intent_label or "unknown"
+            if intent not in result:
+                result[intent] = []
+            
+            # 提取该路径涉及的文档
+            for node_id in path.nodes:
+                if node_id in self.graph.nodes:
+                    doc_id = self.graph.nodes[node_id].get("doc_id", "")
+                    if doc_id and doc_id in doc_map:
+                        doc = doc_map[doc_id]
+                        if doc not in result[intent]:
+                            result[intent].append(doc)
+        
+        return result
+
+    async def _evaluate_gap_satisfaction(
+        self,
+        context: AgentContext,
+        gap: InfoGap,
+        retrieved_docs: List[Dict[str, Any]],
+        paths: List[RankedPath]
+    ) -> GapRetrievalResult:
+        """评估单个缺口的补全情况
+        
+        Args:
+            context: Agent 上下文
+            gap: 信息缺口
+            retrieved_docs: 检索到的文档
+            paths: 检索到的路径（目前仅用于调试参考）
+            
+        Returns:
+            缺口检索结果
+        """
+        # 查找或创建该缺口的历史记录
+        existing_result = context.get_gap_result(gap.gap_description)
+        
+        if existing_result:
+            # 更新尝试次数
+            attempt_count = existing_result.attempt_count + 1
+            # 合并检索到的文档
+            all_retrieved_docs = list(set(
+                existing_result.retrieved_docs + 
+                [d.get("doc_id", "") for d in retrieved_docs]
+            ))
+        else:
+            attempt_count = 1
+            all_retrieved_docs = [d.get("doc_id", "") for d in retrieved_docs]
+        
+        # 生成评估 prompt（现在只依赖文档，移除 path_info）
+        prompt = get_gap_satisfaction_prompt(
+            question=context.question,
+            gap_description=gap.gap_description,
+            related_entities=gap.related_entities,
+            retrieved_docs=retrieved_docs,
+            max_docs=self.top_k_docs
+        )
+        
+        try:
+            messages = [{"role": "user", "content": prompt}]
+            response = await self.llm.generate(
+                messages=messages,
+                temperature=0.2,
+                max_tokens=512
+            )
+            
+            # 解析响应
+            result = await self._parse_json_response(response, target_field="is_satisfied")
+            
+            is_satisfied = result.get("is_satisfied", False)
+            selected_evidence = result.get("selected_evidence", [])
+            failure_hints = result.get("failure_hints", [])
+            
+            if self._debug:
+                print(f"    [DEBUG] Gap '{gap.gap_description[:30]}...' - satisfied: {is_satisfied}, evidence: {len(selected_evidence)}")
+            
+        except Exception as e:
+            if self._debug:
+                print(f"    [WARN] Gap evaluation failed: {e}")
+            is_satisfied = False
+            selected_evidence = []
+            failure_hints = ["评估失败，建议换一个角度重新搜索"]
+        
+        # 确定缺口状态
+        if is_satisfied:
+            status = GapStatus.SATISFIED
+        elif attempt_count >= context.max_gap_attempts:
+            status = GapStatus.EXHAUSTED
+        else:
+            status = GapStatus.ACTIVE
+        
+        # 创建或更新结果
+        gap_result = GapRetrievalResult(
+            gap_description=gap.gap_description,
+            status=status,
+            attempt_count=attempt_count,
+            retrieved_docs=all_retrieved_docs,
+            selected_evidence=selected_evidence,
+            is_satisfied=is_satisfied,
+            failure_hints=failure_hints,
+            last_rewritten_query=gap.rewritten_query
+        )
+        
+        # 更新上下文中的缺口历史
+        context.update_gap_result(gap_result)
+        
+        # 同步更新 InfoGap 的状态
+        gap.status = status
+        gap.attempt_count = attempt_count
+        gap.last_retrieval_result = gap_result
+        
+        if is_satisfied:
+            gap.mark_satisfied()
+        elif status == GapStatus.EXHAUSTED:
+            gap.mark_exhausted()
+        
+        return gap_result
+
+    def _reconstruct_document(self, doc_id: str) -> str:
+        """从图节点重建文档内容"""
+        # 优先使用 pre-built mapping
+        prop_ids = []
+        if self._node_mappings and "doc_to_propositions" in self._node_mappings:
+            prop_ids = self._node_mappings["doc_to_propositions"].get(doc_id, [])
+        
+        if not prop_ids:
+            # 回退到遍历图
+            prop_ids = [node_id for node_id, data in self.graph.nodes(data=True)
+                        if data.get("node_type") == PROPOSITION_NODE and data.get("doc_id") == doc_id]
+
+        # 获取文本和句子索引
+        props = []
+        for pid in prop_ids:
+            if pid in self.graph.nodes:
+                data = self.graph.nodes[pid]
+                text = data.get("text", "")
+                sent_idx = data.get("sent_idx", -1)
+                if text:
+                    props.append((sent_idx, text))
+        
+        # 按句子索引排序并拼接
+        props.sort(key=lambda x: x[0])
+        return "\n".join(text for idx, text in props)
 
     def _clean_short_answer(self, text: str) -> str:
         """清洗 short_answer（尽量满足 EM/F1 的比较习惯）"""
@@ -1139,7 +1487,7 @@ Rules for Answer:
         gap: 'InfoGap',
         index,
         top_k: int = 10
-    ) -> List[str]:
+    ) -> List[Dict]:
         """为单个 InfoGap 执行完整检索流程
 
         Args:
@@ -1149,7 +1497,7 @@ Rules for Answer:
             top_k: 每个路径返回的锚点数量
 
         Returns:
-            该 InfoGap 对应的锚点列表
+            该 InfoGap 对应的锚点节点数据字典列表，每个字典包含 node_id, text, node_type 等属性
         """
         from .agent_data_structures import InfoGap
 
@@ -1180,13 +1528,20 @@ Rules for Answer:
         # 4. 融合去重
         fused_anchors = self._fuse_anchors(proposition_anchors, entity_anchors)
 
-        return fused_anchors
+        # 5. 转换为节点数据字典列表
+        node_data_list = []
+        for node_id in fused_anchors:
+            node_data = dict(self.graph.nodes[node_id])
+            node_data['node_id'] = node_id  # 确保包含node_id
+            node_data_list.append(node_data)
+
+        return node_data_list
 
     async def _retrieve_anchors_by_gaps(
         self,
         context: AgentContext,
         use_rewritten_queries: bool = True
-    ) -> Dict[str, List[str]]:
+    ) -> Dict[str, List[Dict]]:
         """按 InfoGap 分组并行检索锚点
 
         Args:
@@ -1194,7 +1549,8 @@ Rules for Answer:
             use_rewritten_queries: 是否使用改写后的查询
 
         Returns:
-            {gap_description: [锚点列表]} 的字典
+            {gap_description: [锚点节点数据字典列表]} 的字典
+            每个节点数据字典包含 node_id, text, node_type, doc_id 等属性
         """
         from ..config.retrieval_config import get_retrieval_config
         from .agent_data_structures import InfoGap
@@ -1238,7 +1594,17 @@ Rules for Answer:
 
         if self._debug:
             total_anchors = sum(len(anchors) for anchors in gap_to_anchors.values())
+            # 显示节点文本信息便于调试
+            debug_info = []
+            for gap_desc, anchors in gap_to_anchors.items():
+                anchor_texts = [a.get('text', '')[:50] for a in anchors[:3]]  # 只显示前3个
+                debug_info.append(f"  {gap_desc[:30]}: {len(anchors)}个锚点")
+                for text in anchor_texts:
+                    if text:
+                        debug_info.append(f"    - {text}...")
             print(f"    [DEBUG] 分组检索完成: {len(gap_to_anchors)} 个分组, 共 {total_anchors} 个锚点")
+            if debug_info:
+                print("\n".join(debug_info))
 
         return gap_to_anchors
 
@@ -1541,7 +1907,7 @@ Rules for Answer:
         self,
         current_node: str,
         active_edges: Set[str],
-        visited_entities: Set[str],  # 保留用于未来扩展：可基于此过滤已访问实体
+        visited_entities: Set[str],
     ) -> List[tuple]:
         """
         获取候选节点（通过指定的 active_edges）
@@ -1558,95 +1924,66 @@ Rules for Answer:
             visited_entities: 已访问的实体集合
 
         Returns:
-            List of (node_id, node_type) tuples，包含命题和实体节点
+            List of (node_id, node_type) tuples，仅包含命题节点
         """
-        candidates = []
-
-        # 使用邻接表缓存
-        if current_node not in self._adjacency_cache:
-            # 节点不在缓存中（动态添加的节点），回退到原方法
-            return self._get_candidate_nodes_fallback(current_node, active_edges, visited_entities)
-
-        neighbors_by_type = self._adjacency_cache[current_node]
-
-        # 【修复】规范化 active_edges 以匹配规范化后的边类型
         from ..proposition_graph.rst_analyzer import normalize_edge_type
+        
+        candidates = []
+        seen_nodes = set()
+        neighbors_by_type = self._adjacency_cache[current_node]
+        
+        # 规范化 active_edges 以匹配规范化后的边类型
         normalized_active_edges = {normalize_edge_type(e) if e != MENTIONS_ENTITY else e for e in active_edges}
 
-        # 1. 命题节点：必须通过 active_edges 连接（使用规范化后的边类型匹配）
-        for neighbor_info in neighbors_by_type.get(PROPOSITION_NODE, []):
-            # 检查规范化后的边类型是否在 active_edges 中
-            if neighbor_info["edge_type"] in normalized_active_edges:
-                candidates.append((neighbor_info["id"], PROPOSITION_NODE))
-
-        # 2. 实体节点：总是包含（通过 MENTIONS_ENTITY 边）
-        for neighbor_info in neighbors_by_type.get(ENTITY_NODE, []):
-            if neighbor_info["edge_type"] == MENTIONS_ENTITY:
-                candidates.append((neighbor_info["id"], ENTITY_NODE))
-
-        # 3. 全局实体节点
-        for neighbor_info in neighbors_by_type.get(GLOBAL_ENTITY_NODE, []):
-            if neighbor_info["edge_type"] == MENTIONS_ENTITY:
-                candidates.append((neighbor_info["id"], GLOBAL_ENTITY_NODE))
+        # 1. 命题节点：区分不同边类型的处理
+        # SIMILARITY 边始终可用，SKELETON 和 DETAIL 边需要检查 active_edges
+        from ..proposition_graph.rst_analyzer import EDGE_TYPE_SIMILARITY
         
-        # 【修复】4. 如果当前节点是实体，也考虑通过 MENTIONS_ENTITY 反向边连接的命题节点
-        # （处理缺少反向边的情况，使 MENTIONS_ENTITY 真正双向）
-        current_node_data = self.graph.nodes.get(current_node, {})
+        for neighbor_info in neighbors_by_type.get(PROPOSITION_NODE, []):
+            edge_type = neighbor_info["edge_type"]
+            
+            # SIMILARITY 边始终可用，不受 active_edges 限制
+            if edge_type == EDGE_TYPE_SIMILARITY:
+                node_id = neighbor_info["id"]
+                if node_id not in seen_nodes:
+                    candidates.append((node_id, PROPOSITION_NODE))
+                    seen_nodes.add(node_id)
+            # SKELETON 和 DETAIL 边需要检查 active_edges
+            elif edge_type in normalized_active_edges:
+                node_id = neighbor_info["id"]
+                if node_id not in seen_nodes:
+                    candidates.append((node_id, PROPOSITION_NODE))
+                    seen_nodes.add(node_id)
+
+        # 2. 实体节点跳转逻辑：
+        #    跨过实体寻找其他引用该实体的命题（反向边连接的命题）
+        #    实现 Proposition -> Entity -> Proposition 的一步跨越
+        for node_type in [ENTITY_NODE, GLOBAL_ENTITY_NODE]:
+            for neighbor_info in neighbors_by_type.get(node_type, []):
+                if neighbor_info["edge_type"] == MENTIONS_ENTITY:
+                    entity_id = neighbor_info["id"]
+                    
+                    # 寻找所有引用该实体的其他命题
+                    for pred in self._predecessors_cache.get(entity_id, []):
+                        if pred == current_node or pred in seen_nodes:
+                            continue
+                        pred_data = self.graph.nodes[pred]
+                        if pred_data.get("node_type") == PROPOSITION_NODE:
+                            if self.graph[pred][entity_id].get("edge_type") == MENTIONS_ENTITY:
+                                candidates.append((pred, PROPOSITION_NODE))
+                                seen_nodes.add(pred)
+        
+        # 3. 处理当前节点本身是实体的情况（例如锚点是实体）
+        current_node_data = self.graph.nodes[current_node]
         if current_node_data.get("node_type") in [ENTITY_NODE, GLOBAL_ENTITY_NODE]:
-            # 查找通过 MENTIONS_ENTITY 边指向当前实体的命题节点
             for pred in self._predecessors_cache.get(current_node, []):
-                if pred not in self.graph:
+                if pred in seen_nodes:
                     continue
                 pred_data = self.graph.nodes[pred]
                 if pred_data.get("node_type") == PROPOSITION_NODE:
-                    # 检查是否有 MENTIONS_ENTITY 边
-                    if self.graph.has_edge(pred, current_node):
-                        edge_data = self.graph[pred][current_node]
-                        if edge_data.get("edge_type") == MENTIONS_ENTITY:
-                            # 添加该命题节点作为候选（通过实体桥接）
-                            candidates.append((pred, PROPOSITION_NODE))
-
-        return candidates
-
-    def _get_candidate_nodes_fallback(
-        self,
-        current_node: str,
-        active_edges: Set[str],
-        visited_entities: Set[str],
-    ) -> List[tuple]:
-        """获取候选节点的回退方法（用于动态添加的节点）"""
-        from ..proposition_graph.rst_analyzer import normalize_edge_type
-        candidates = []
-
-        # 【修复】规范化 active_edges
-        normalized_active_edges = {normalize_edge_type(e) if e != MENTIONS_ENTITY else e for e in active_edges}
-
-        for neighbor in self.graph.neighbors(current_node):
-            if self.graph.has_edge(current_node, neighbor):
-                edge_data = self.graph[current_node][neighbor]
-                edge_type = edge_data.get("edge_type", "")
-                neighbor_data = self.graph.nodes[neighbor]
-                neighbor_type = neighbor_data.get("node_type", "")
-
-                if neighbor_type == PROPOSITION_NODE:
-                    # 规范化边类型并匹配
-                    normalized_type = normalize_edge_type(edge_type)
-                    if normalized_type in normalized_active_edges:
-                        candidates.append((neighbor, neighbor_type))
-                elif neighbor_type in [ENTITY_NODE, GLOBAL_ENTITY_NODE]:
-                    if edge_type == MENTIONS_ENTITY:
-                        candidates.append((neighbor, neighbor_type))
-        
-        # 【修复】如果当前节点是实体，也考虑反向 MENTIONS_ENTITY 边
-        current_node_data = self.graph.nodes.get(current_node, {})
-        if current_node_data.get("node_type") in [ENTITY_NODE, GLOBAL_ENTITY_NODE]:
-            for pred in self.graph.predecessors(current_node):
-                if self.graph.has_edge(pred, current_node):
-                    edge_data = self.graph[pred][current_node]
-                    if edge_data.get("edge_type") == MENTIONS_ENTITY:
-                        pred_data = self.graph.nodes.get(pred, {})
-                        if pred_data.get("node_type") == PROPOSITION_NODE:
-                            candidates.append((pred, PROPOSITION_NODE))
+                    if self.graph[pred][current_node].get("edge_type") == MENTIONS_ENTITY:
+                        candidates.append((pred, PROPOSITION_NODE))
+                        seen_nodes.add(pred)
 
         return candidates
 
@@ -1778,27 +2115,13 @@ Rules for Answer:
             if not candidates:
                 continue
 
-            # 分别处理命题节点和实体节点
-            proposition_candidates = [(nid, nt) for nid, nt in candidates if nt == PROPOSITION_NODE]
-            entity_candidates = [(nid, nt) for nid, nt in candidates if nt in [ENTITY_NODE, GLOBAL_ENTITY_NODE]]
-
             # 评分命题节点（直接评分）
-            prop_node_ids = [nid for nid, _ in proposition_candidates]
-            prop_scores = await self.path_scorer.score_nodes(
+            prop_node_ids = [nid for nid, _ in candidates]
+            all_scores = await self.path_scorer.score_nodes(
                 question=question,
                 candidate_nodes=prop_node_ids,
                 visited_entities=path.visited_entities,
             ) if prop_node_ids else []
-
-            # 评分实体节点（拼接文本评分，返回下游命题节点ID）
-            entity_scores = await self._score_entity_via_concat(
-                path=path,
-                entity_candidates=entity_candidates,
-                question=question
-            ) if entity_candidates else []
-
-            # 合并评分结果
-            all_scores = list(prop_scores) + list(entity_scores)
 
             # 扩展路径（添加的都是命题节点ID）
             for score in all_scores:
@@ -1817,106 +2140,6 @@ Rules for Answer:
                 new_paths.append(new_path)
 
         return new_paths
-
-    async def _score_entity_via_concat(
-        self,
-        path: Path,
-        entity_candidates: List[tuple],
-        question: str
-    ) -> List:
-        """对实体节点进行拼接文本评分，返回下游命题节点评分
-
-        拼接格式: "命题1文本 实体名称 命题2文本"
-
-        【性能优化】批量嵌入：收集所有拼接文本后一次性调用API
-
-        Args:
-            path: 当前路径
-            entity_candidates: [(entity_id, entity_type), ...]
-            question: 问题
-
-        Returns:
-            下游命题节点的评分列表
-        """
-        from .path_scorer import NodeScore
-
-        if not path.nodes:
-            return []
-
-        # 获取路径中最后一个命题节点
-        last_prop = path.get_last_proposition()
-        if not last_prop:
-            return []
-
-        last_prop_text = self.graph.nodes[last_prop].get("text", "")
-
-        # 【性能优化】批量收集所有拼接文本
-        concat_texts = []
-        text_to_node = []  # (next_prop, entity_name)
-
-        for entity_id, _ in entity_candidates:
-            entity_name = self.graph.nodes[entity_id].get("text", "")
-
-            # 【性能优化】使用邻接表缓存避免图遍历
-            neighbors_by_type = self._adjacency_cache.get(entity_id, {})
-            prop_neighbors = neighbors_by_type.get(PROPOSITION_NODE, [])
-            next_props = [neighbor_info["id"] for neighbor_info in prop_neighbors]
-
-            for next_prop in next_props:
-                next_prop_text = self.graph.nodes[next_prop].get("text", "")
-                concatenated_text = f"{last_prop_text} {entity_name} {next_prop_text}"
-                concat_texts.append(concatenated_text)
-                text_to_node.append((next_prop, entity_name))
-
-        if not concat_texts:
-            return []
-
-        # 【性能优化】批量获取嵌入（优先使用缓存管理器）
-        if hasattr(self, 'embedding_cache_manager') and self.embedding_cache_manager:
-            concat_embeddings = await self.embedding_cache_manager.get_embeddings_batch(concat_texts)
-        else:
-            # 回退到批量API
-            response = await self.embedding_client.embed(concat_texts)
-            concat_embeddings = [np.array(emb) for emb in response.embeddings]
-
-        # 【性能优化】获取问题嵌入（使用缓存）
-        if hasattr(self, 'embedding_cache_manager') and self.embedding_cache_manager:
-            question_embedding = await self.embedding_cache_manager.get_embedding(question)
-        elif not hasattr(self, '_cached_question_embedding') or self._cached_question_text != question:
-            self._cached_question_embedding = np.array(
-                await self.embedding_client.embed_single(question)
-            )
-            self._cached_question_text = question
-            question_embedding = self._cached_question_embedding
-        else:
-            question_embedding = self._cached_question_embedding
-
-        # 【性能优化】向量化计算相似度
-        concat_embeddings_array = np.array(concat_embeddings)
-        question_embedding_array = question_embedding.reshape(1, -1)
-
-        # 批量计算余弦相似度
-        norms = np.linalg.norm(concat_embeddings_array, axis=1)
-        question_norm = np.linalg.norm(question_embedding_array)
-        similarities = np.dot(concat_embeddings_array, question_embedding_array.T).flatten() / (norms * question_norm + 1e-8)
-
-        # 构建评分结果
-        scores = []
-        for (next_prop, entity_name), similarity in zip(text_to_node, similarities):
-            bridge_score = self.path_scorer._compute_bridge_score(next_prop, path.visited_entities)
-            total_score = (
-                self.semantic_weight * float(similarity) +
-                self.bridge_weight * bridge_score
-            )
-
-            scores.append(NodeScore(
-                node_id=next_prop,
-                semantic_score=float(similarity),
-                bridge_score=bridge_score,
-                total_score=total_score
-            ))
-
-        return scores
 
     def _global_prune(self, paths: List[Path], beam_width: int) -> List[Path]:
         """全局剪枝：按分数排序，保留 top-k
@@ -2162,50 +2385,27 @@ Rules for Answer:
         # 去重
         return list(set(valid_anchors))
 
-    async def _extract_evidence(self, context: AgentContext, paths: List[RankedPath]) -> List[str]:
-        """从路径中提取证据（优化：支持批量处理）"""
-        if not paths:
+    async def _extract_evidence(self, context: AgentContext, docs: List[Dict[str, Any]]) -> List[str]:
+        """从文档中提取证据（优化：支持批量处理）"""
+        if not docs:
             return []
 
-        # 如果路径数量较少（<=10），单次调用
-        if len(paths) <= 10:
-            return await self._batch_extract_evidence(context, paths)
-
-        # 否则分批并发处理
-        return await self._batch_extract_evidence_large(context, paths)
+        # 对于文档提取，我们通常不需要像路径那样大规模并发，因为文档数量本来就被 top_k_docs 限制了
+        # 但为了接口一致性，我们还是保留类似的结构
+        return await self._batch_extract_evidence(context, docs)
 
     async def _batch_extract_evidence(
         self,
         context: AgentContext,
-        paths: List[RankedPath]
+        docs: List[Dict[str, Any]]
     ) -> List[str]:
-        """批量提取证据（单次 LLM 调用）
+        """批量提取证据（单次 LLM 调用）"""
+        from .agent_prompts import get_extract_from_docs_prompt
 
-        支持 RankedPath 格式（subgraph_structures.RankedPath）
-        """
-        # 准备路径信息
-        path_info = []
-        for path in paths[:10]:
-            text = ""
-            # 获取路径中的命题文本
-            for node_id in path.nodes:
-                if node_id in self.graph.nodes:
-                    node_text = self.graph.nodes[node_id].get("text", "")
-                    if node_text:
-                        text += node_text + " "
-
-            # 使用 normalized_score 作为分数
-            score = path.normalized_score
-
-            path_info.append({
-                "text": text.strip(),
-                "score": score
-            })
-
-        prompt = get_extract_prompt(
+        prompt = get_extract_from_docs_prompt(
             question=context.question,
-            paths=path_info,
-            max_paths=10
+            docs=docs,
+            max_docs=self.top_k_docs
         )
 
         try:
@@ -2221,21 +2421,18 @@ Rules for Answer:
 
         except Exception as e:
             print(f"证据提取失败: {e}")
-            # 后备：直接使用路径文本
-            return [p["text"] for p in path_info]
+            # 后备：使用文档摘要或标题
+            return [f"文档: {d.get('title', '未知')}" for d in docs]
 
     async def _batch_extract_evidence_large(
         self,
         context: AgentContext,
-        paths: List[RankedPath],
-        batch_size: int = 10
+        docs: List[Dict[str, Any]],
+        batch_size: int = 5
     ) -> List[str]:
-        """批量提取证据（并发多个 LLM 调用）
-
-        对于大量路径，分批并发提取以提高吞吐量
-        """
+        """批量提取证据（并发多个 LLM 调用）"""
         # 分批处理
-        batches = [paths[i:i+batch_size] for i in range(0, len(paths), batch_size)]
+        batches = [docs[i:i+batch_size] for i in range(0, len(docs), batch_size)]
 
         # 并发调用 LLM
         tasks = [self._batch_extract_evidence(context, batch) for batch in batches]
@@ -2413,7 +2610,6 @@ Rules for Answer:
 
             # 【性能优化】1. 预先收集所有候选节点和待评分节点
             all_prop_candidates = []  # 所有命题候选
-            all_entity_candidates_by_node = {}  # {from_node: entity_candidates}
 
             for node_id in list(subgraph.frontier_nodes):
                 candidates = self._get_candidate_nodes(
@@ -2425,19 +2621,11 @@ Rules for Answer:
                 if self._debug and depth == 0:
                     print(f"    [DEBUG] 扩展节点 {node_id}: {len(candidates)} 个候选")
 
-                # 分别处理命题节点和实体节点
-                prop_candidates = [(nid, nt) for nid, nt in candidates if nt == PROPOSITION_NODE]
-                entity_candidates = [(nid, nt) for nid, nt in candidates if nt in [ENTITY_NODE, GLOBAL_ENTITY_NODE]]
-
                 # 收集命题候选
-                all_prop_candidates.extend([(node_id, nid, nt) for nid, nt in prop_candidates])
-
-                # 收集实体候选（按源节点分组）
-                if entity_candidates:
-                    all_entity_candidates_by_node[node_id] = entity_candidates
+                all_prop_candidates.extend([(node_id, nid, nt) for nid, nt in candidates])
 
             # 【性能优化】2. 批量评分所有命题节点
-            prop_expansions = []  # (from_node, to_node, score)
+            all_expansions = []  # (from_node, to_node, score)
 
             if all_prop_candidates:
                 # 提取节点ID
@@ -2454,36 +2642,7 @@ Rules for Answer:
                 score_dict = {s.node_id: s for s in scores}
                 for from_node, to_node, _ in all_prop_candidates:
                     if to_node in score_dict:
-                        prop_expansions.append((from_node, to_node, score_dict[to_node].total_score))
-
-            # 【性能优化】3. 并行处理实体节点评分
-            entity_expansions = []
-
-            if all_entity_candidates_by_node:
-                # 创建并行任务
-                entity_tasks = []
-                for from_node, entity_candidates in all_entity_candidates_by_node.items():
-                    task = self._score_entity_for_parallel(
-                        from_node=from_node,
-                        entity_candidates=entity_candidates,
-                        question=question,
-                        visited_entities=subgraph.visited_entities
-                    )
-                    entity_tasks.append(task)
-
-                # 并行执行
-                results = await asyncio.gather(*entity_tasks, return_exceptions=True)
-
-                # 收集结果
-                for result in results:
-                    if isinstance(result, Exception):
-                        if self._debug:
-                            print(f"    [DEBUG] 实体评分失败: {result}")
-                        continue
-                    entity_expansions.extend(result)
-
-            # 合并所有扩展
-            all_expansions = prop_expansions + entity_expansions
+                        all_expansions.append((from_node, to_node, score_dict[to_node].total_score))
 
             if self._debug and depth == 0:
                 print(f"    [DEBUG] 深度 {depth}: {len(all_expansions)} 个扩展候选")
@@ -2528,40 +2687,6 @@ Rules for Answer:
                 if self._debug:
                     print(f"    [DEBUG] 深度 {depth+1}: new_frontier 为空，终止扩展")
                 break
-
-    async def _score_entity_for_parallel(
-        self,
-        from_node: str,
-        entity_candidates: List[tuple],
-        question: str,
-        visited_entities: Set[str]
-    ) -> List[tuple]:
-        """
-        并行实体评分辅助方法
-
-        Args:
-            from_node: 源节点ID
-            entity_candidates: 实体候选列表 [(entity_id, entity_type), ...]
-            question: 问题
-            visited_entities: 已访问实体集合
-
-        Returns:
-            [(from_node, to_node, score), ...] 列表
-        """
-        # 创建临时 Path 对象
-        temp_path = Path(graph=self.graph)
-        temp_path.nodes = [from_node]
-        temp_path.visited_entities = visited_entities.copy()
-
-        # 评分
-        scores = await self._score_entity_via_concat(
-            path=temp_path,
-            entity_candidates=entity_candidates,
-            question=question
-        )
-
-        # 返回扩展候选
-        return [(from_node, score.node_id, score.total_score) for score in scores]
 
     def _collect_all_paths(
         self,

@@ -104,6 +104,7 @@ The graph is a NetworkX DiGraph with three node types:
 Edge types:
 - **Skeleton edges** (Nucleus-Nucleus): SEQUENCE, CONTRAST, CONCESSION
 - **Detail edges** (Nucleus-Satellite): CAUSED_BY, MOTIVATION, ELABORATION, BACKGROUND
+- **Similarity edges**: SIMILARITY (cross-document semantic similarity, bidirectional)
 - **Mention edges**: MENTIONS_ENTITY (proposition <-> entity, bidirectional)
 
 ### Key Components
@@ -132,11 +133,17 @@ Key classes:
 CHECK_PLAN -> RETRIEVE -> MAP -> UPDATE -> (CHECK_PLAN or ANSWER)
 ```
 
-- **CHECK_PLAN**: LLM checks if current info is sufficient, identifies gaps
+- **CHECK_PLAN**: LLM checks if current info is sufficient, identifies gaps and selects active edges
 - **RETRIEVE**: Finds anchor points using vector search
-- **MAP**: Beam search for path exploration (progressive)
+- **MAP**: Beam search for path exploration (progressive), respecting active_edges
 - **UPDATE**: Ranks paths, extracts evidence
 - **ANSWER**: Generates final answer
+
+**Active Edges Mechanism**:
+- `active_edges` controls which edge types are used during MAP phase path expansion
+- **Controllable edges**: SKELETON and DETAIL (selected by LLM based on intent)
+- **Always available**: SIMILARITY and MENTIONS_ENTITY (not restricted by active_edges)
+- This allows dynamic exploration strategy while maintaining baseline connectivity
 
 **Path Scoring** (`path_scorer.py`):
 ```

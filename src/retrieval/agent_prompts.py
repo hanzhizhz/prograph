@@ -5,7 +5,10 @@ Agent Prompt 模板
 参考 ggagent3 的 gap-driven exploration 设计。
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .agent_data_structures import InfoGap
 
 
 # ============== CHECK_PLAN 合并阶段 Prompt ==============
@@ -15,32 +18,32 @@ CHECK_PLAN_PROMPT = """你是一个专业的多跳问答系统。请判断当前
 **问题：**
 {question}
 
-**已收集的证据（最近 {evidence_count} 条）：**
+**已收集的证据（来自原始文档，最近 {evidence_count} 条）：**
 {evidence}
 
 **已访问实体：**
 {visited_entities}
 
+{gap_history_section}
+
 **探索路径说明：**
 
-系统使用两种逻辑路径进行推理探索，请根据当前信息缺口选择最合适的路径：
+请根据信息缺口选择合适的探索路径（active_edges）：
 
-1. **DETAIL（细节路径）**
-   - 含义：寻找补充信息、解释说明、背景细节
-   - 适用场景：需要了解"具体情况"、"原因是什么"、"更多细节"
-   - 示例：事件的时间、地点、原因、方式、参与者背景
-   - 设计理由：主从关系，目标节点对源节点进行补充，扩展细节
+1. **SKELETON（骨干边）** - 追踪事件发展、时序关系、对比转折
+   - 适用场景：需要了解"接下来发生什么"、"事件顺序"、"矛盾对比"
+   - 意图标签示例：Trace_Process（追踪事件发展）、Check_Conflict（检查矛盾转折）
 
-2. **SIMILARITY（相似路径）**
-   - 含义：寻找内容相似、相关主题、跨文档关联
-   - 适用场景：需要了解"类似信息"、"其他角度"、"相关描述"
-   - 示例：相似事件的描述、不同文档对同一主题的讨论
-   - 设计理由：软连接，通过语义相似性连接相关信息
+2. **DETAIL（细节边）** - 寻找原因、动机、背景、解释说明
+   - 适用场景：需要了解"为什么"、"原因是什么"、"背景信息"、"详细说明"
+   - 意图标签示例：Find_Reason（寻找原因动机）、Expand_Detail（扩展背景细节）
 
 **路径选择建议：**
-- 问题询问细节、原因、背景 → 优先选择 DETAIL
-- 问题询问类似信息、其他角度 → 优先选择 SIMILARITY
-- 可以组合多条路径以覆盖不同推理角度
+- 追踪事件发展、时序流程 → 选择 SKELETON
+- 寻找原因、动机、背景 → 选择 DETAIL
+- 检查矛盾、转折对比 → 选择 SKELETON
+- 扩展详细说明 → 选择 DETAIL
+- 可以组合多种边类型以覆盖不同推理角度
 
 **输出格式（如果可以回答）：**
 ```json
@@ -59,8 +62,8 @@ CHECK_PLAN_PROMPT = """你是一个专业的多跳问答系统。请判断当前
     {{
       "gap_description": "需要查找的具体信息",
       "related_entities": ["实体1", "实体2"],
-      "intent_label": "自定义意图描述",
-      "active_edges": ["DETAIL", "SIMILARITY"]
+      "intent_label": "自定义意图描述（如 Trace_Process, Find_Reason, Expand_Detail, Check_Conflict 等）",
+      "active_edges": ["SKELETON", "DETAIL"]
     }}
   ],
   "summary": "简要总结当前推理状态和下一步计划"
@@ -70,9 +73,27 @@ CHECK_PLAN_PROMPT = """你是一个专业的多跳问答系统。请判断当前
 **要求：**
 1. 如果证据包含问题的直接答案，设置 can_answer=true
 2. intent_label 用于记录推理意图（自由描述，不受限制）
-3. active_edges 从上述两种路径中选择，可以选择多个
+3. active_edges 从 SKELETON 和 DETAIL 中选择，可以组合使用
 4. 根据信息缺口的类型选择最合适的探索路径组合
-5.gap_description请不要使用复合描述，多个信息缺口请使用多个gap_description，保持每个gap_description的独立性，方便检索。
+5. gap_description请不要使用复合描述，多个信息缺口请使用多个gap_description，保持每个gap_description的独立性，方便检索
+6. **重要**：参考历史缺口状态，避免提出与已耗尽(EXHAUSTED)缺口相同或高度相似的描述
+7. 对于状态为"正在探索"(ACTIVE)的缺口，如有失败提示，请参考提示换一个角度描述
+"""
+
+# 历史缺口状态部分（可选）
+GAP_HISTORY_SECTION = """**历史缺口状态：**
+{gap_history}
+
+**缺口状态说明：**
+- 待探索(PENDING)：尚未开始检索
+- 正在探索(ACTIVE)：已尝试但未补全，可参考失败提示改进
+- 已耗尽(EXHAUSTED)：多次尝试无果，不应再次提出相同描述
+- 已补全(SATISFIED)：已找到足够信息
+
+**重要提醒：**
+- 不要重复提出与"已耗尽"状态缺口相同或高度相似的 gap_description
+- 对于"正在探索"状态的缺口，参考其失败提示，换一个完全不同的角度
+- 如果某个信息确实无法获取，考虑放弃该方向，尝试其他推理路径
 """
 
 
@@ -80,7 +101,8 @@ def get_check_plan_prompt(
     question: str,
     evidence: List[str],
     visited_entities: set,
-    evidence_count: int = 20
+    evidence_count: int = 20,
+    gap_history: str = ""
 ) -> str:
     """生成 CHECK_PLAN 阶段的 Prompt
 
@@ -89,18 +111,26 @@ def get_check_plan_prompt(
         evidence: 证据列表
         visited_entities: 已访问实体集合
         evidence_count: 证据数量
+        gap_history: 历史缺口状态信息
 
     Returns:
         Prompt 字符串
     """
     evidence_text = "\n".join(f"- {e}" for e in evidence[-evidence_count:])
     entities_text = ", ".join(visited_entities) if visited_entities else "无"
+    
+    # 构建历史缺口状态部分
+    if gap_history:
+        gap_history_section = GAP_HISTORY_SECTION.format(gap_history=gap_history)
+    else:
+        gap_history_section = ""
 
     return CHECK_PLAN_PROMPT.format(
         question=question,
         evidence=evidence_text,
         visited_entities=entities_text,
-        evidence_count=evidence_count
+        evidence_count=evidence_count,
+        gap_history_section=gap_history_section
     )
 
 
@@ -156,6 +186,63 @@ QUERY_REWRITE_PROMPT = """你是一个专业的检索查询优化专家。请将
 3. 每个缺口生成 1 个改写查询
 """
 
+# 重试缺口的增强版查询改写 Prompt
+QUERY_REWRITE_RETRY_PROMPT = """你是一个专业的检索查询优化专家。请将信息缺口改写为适合向量检索的查询文本。
+
+**原始问题：**
+{question}
+
+**信息缺口（按序号列出）：**
+{info_gaps}
+
+**历史尝试信息（重要！）：**
+{retry_history}
+
+**改写要求：**
+
+1. **主体明确**：查询的主体必须完整，不能使用代词
+2. **原子查询**：每个查询应该是单一、独立的查询单元
+3. **无依赖性**：查询不应依赖上下文或前置条件
+4. **信息丰富**：包含关键实体、属性、关系等信息
+5. **自然表达**：使用自然语言表达，便于向量检索匹配
+
+**重试缺口的特殊改写要求：**
+
+对于标记为"重试"的缺口，你必须：
+1. **完全换一个角度**：不要使用与上次查询相似的表述
+2. **参考失败提示**：根据提示的建议方向进行改写
+3. **尝试不同的关联**：
+   - 如果之前搜索实体属性失败，尝试搜索实体关系
+   - 如果之前搜索直接信息失败，尝试搜索背景或上下文信息
+   - 如果之前搜索具体事实失败，尝试搜索相关事件或时间线
+
+**改写角度建议：**
+- 人物 → 尝试搜索其职业、所属组织、参与事件
+- 事件 → 尝试搜索时间、地点、参与者、原因、结果
+- 概念 → 尝试搜索定义、示例、相关概念
+- 关系 → 尝试搜索关系的双方、关系类型、时间范围
+
+**输出格式：**
+```json
+{{
+  "queries": [
+    {{
+      "index": 0,
+      "query": "改写后的查询文本",
+      "target_gap": "对应的原始缺口描述",
+      "strategy": "改写策略说明（对于重试缺口必填）"
+    }}
+  ],
+  "rationale": "改写理由的简要说明"
+}}
+```
+
+**要求：**
+1. 必须按序号处理每个信息缺口
+2. `index` 必须与输入的序号一致（从 0 开始）
+3. 对于重试缺口，查询必须与上次查询有明显区别
+"""
+
 
 def get_query_rewrite_prompt(
     question: str,
@@ -178,6 +265,51 @@ def get_query_rewrite_prompt(
     return QUERY_REWRITE_PROMPT.format(
         question=question,
         info_gaps=gaps_text
+    )
+
+
+def get_query_rewrite_retry_prompt(
+    question: str,
+    info_gaps: List['InfoGap'],
+    retry_info: Dict[int, Dict[str, Any]]
+) -> str:
+    """生成重试缺口的增强版查询改写 Prompt
+
+    Args:
+        question: 原始问题
+        info_gaps: 信息缺口列表
+        retry_info: 重试信息字典 {index: {last_query, failure_hints, retrieved_docs}}
+
+    Returns:
+        Prompt 字符串
+    """
+    # 构建缺口文本，标记重试缺口
+    gaps_lines = []
+    for i, gap in enumerate(info_gaps):
+        line = f"{i}. {gap.gap_description}（实体：{', '.join(gap.related_entities)}）"
+        if i in retry_info:
+            line += " [重试]"
+        gaps_lines.append(line)
+    gaps_text = "\n".join(gaps_lines)
+    
+    # 构建重试历史信息
+    retry_lines = []
+    for idx, info in retry_info.items():
+        retry_lines.append(f"缺口 {idx}:")
+        if info.get("last_query"):
+            retry_lines.append(f"  - 上次查询: {info['last_query']}")
+        if info.get("failure_hints"):
+            retry_lines.append(f"  - 失败提示: {'; '.join(info['failure_hints'])}")
+        if info.get("retrieved_docs"):
+            doc_count = len(info["retrieved_docs"])
+            retry_lines.append(f"  - 上次检索到 {doc_count} 个文档，但未能满足需求")
+    
+    retry_history = "\n".join(retry_lines) if retry_lines else "无历史尝试"
+
+    return QUERY_REWRITE_RETRY_PROMPT.format(
+        question=question,
+        info_gaps=gaps_text,
+        retry_history=retry_history
     )
 
 
@@ -247,13 +379,13 @@ def get_anchor_judge_prompt(
 
 # ============== UPDATE 阶段 Prompt ==============
 
-UPDATE_EXTRACT_PROMPT = """你是一个专业的信息提取专家。请从检索到的路径中提取有用的信息来回答问题。
+DOC_EXTRACT_PROMPT = """你是一个专业的信息提取专家。请从检索到的文档中提取有用的信息来回答问题。
 
 **问题：**
 {question}
 
-**检索到的路径（按相关性排序）：**
-{paths}
+**检索到的文档（按相关性排序）：**
+{docs}
 
 **请提取：**
 1. 与问题直接相关的事实
@@ -271,29 +403,118 @@ UPDATE_EXTRACT_PROMPT = """你是一个专业的信息提取专家。请从检�
 """
 
 
-def get_extract_prompt(
+def get_extract_from_docs_prompt(
     question: str,
-    paths: List[Dict[str, Any]],
-    max_paths: int = 10
+    docs: List[Dict[str, Any]],
+    max_docs: int = 5
 ) -> str:
-    """生成信息提取 Prompt
+    """生成信息提取 Prompt（基于文档）
 
     Args:
         question: 问题
-        paths: 路径列表
-        max_paths: 最大路径数
+        docs: 文档列表
+        max_docs: 最大文档数
 
     Returns:
         Prompt 字符串
     """
-    paths_text = "\n".join(
-        f"{i+1}. {p.get('text', '')} (分数: {p.get('score', 0):.2f})"
-        for i, p in enumerate(paths[:max_paths])
+    docs_text = ""
+    for i, doc in enumerate(docs[:max_docs]):
+        doc_id = doc.get("doc_id", f"doc_{i}")
+        title = doc.get("title", "未知标题")
+        content = doc.get("content", "")[:1000]  # 提取时可以放宽一点长度
+        docs_text += f"\n[{i+1}] {title} (ID: {doc_id})\n{content}\n"
+
+    if not docs_text:
+        docs_text = "无检索到的文档"
+
+    return DOC_EXTRACT_PROMPT.format(
+        question=question,
+        docs=docs_text
     )
 
-    return UPDATE_EXTRACT_PROMPT.format(
+
+# ============== 缺口补全评估 Prompt ==============
+
+GAP_SATISFACTION_PROMPT = """你是一个专业的信息检索评估专家。请评估检索结果是否满足了信息缺口的需求。
+
+**原始问题：**
+{question}
+
+**信息缺口描述：**
+{gap_description}
+
+**关联实体：**
+{related_entities}
+
+**检索到的文档：**
+{retrieved_docs}
+
+**评估任务：**
+1. 判断检索结果是否包含了能够填补该信息缺口的信息
+2. 如果包含，从文档中提取有效的证据（原始文本片段）
+3. 如果未能满足，分析原因并给出下一步搜索方向的建议
+
+**输出格式：**
+```json
+{{
+  "is_satisfied": true/false,
+  "selected_evidence": ["证据1", "证据2", ...],
+  "satisfaction_reason": "满足/不满足的原因说明",
+  "failure_hints": ["建议1", "建议2", ...]
+}}
+```
+
+**failure_hints 示例（仅在 is_satisfied=false 时填写）：**
+- "尝试搜索该人物的其他身份或职业信息"
+- "尝试搜索相关事件的时间线"
+- "尝试搜索与该实体有关联的其他组织或机构"
+- "尝试从其他角度描述相同的信息需求"
+- "尝试扩大搜索范围，包含相关背景信息"
+
+**评估标准：**
+- is_satisfied=true：检索结果中包含了能够直接或间接填补信息缺口的关键信息
+- is_satisfied=false：检索结果与信息缺口无关，或信息不足以填补缺口
+"""
+
+
+def get_gap_satisfaction_prompt(
+    question: str,
+    gap_description: str,
+    related_entities: List[str],
+    retrieved_docs: List[Dict[str, Any]],
+    max_docs: int = 5
+) -> str:
+    """生成缺口补全评估 Prompt
+
+    Args:
+        question: 原始问题
+        gap_description: 信息缺口描述
+        related_entities: 关联实体列表
+        retrieved_docs: 检索到的文档列表
+        max_docs: 最大文档数
+
+    Returns:
+        Prompt 字符串
+    """
+    entities_text = ", ".join(related_entities) if related_entities else "无"
+    
+    # 格式化文档
+    docs_text = ""
+    for i, doc in enumerate(retrieved_docs[:max_docs]):
+        doc_id = doc.get("doc_id", f"doc_{i}")
+        title = doc.get("title", "未知标题")
+        content = doc.get("content", "")[:800]  # 评估时也保持一定长度
+        docs_text += f"\n[{i+1}] {title} (ID: {doc_id})\n{content}\n"
+    
+    if not docs_text:
+        docs_text = "无检索到的文档"
+
+    return GAP_SATISFACTION_PROMPT.format(
         question=question,
-        paths=paths_text
+        gap_description=gap_description,
+        related_entities=entities_text,
+        retrieved_docs=docs_text
     )
 
 
