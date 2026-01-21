@@ -18,11 +18,11 @@ cd "$PROJECT_ROOT" || exit 1
 # 创建日志目录
 mkdir -p "$LOG_DIR"
 
-# 数据集配置：训练数据路径|图路径|索引目录
+# 数据集配置：训练数据路径|图路径|索引目录|持久化目录
 declare -A DATASETS=(
-    ["HotpotQA"]="dataset/HotpotQA/train_data_filtered.json|output/HotpotQA/proposition_graph/linked_graph.pkl|output/HotpotQA/persistence_data"
-    ["2WikiMultihopQA"]="dataset/2WikiMultihopQA/train_data_filtered.json|output/2WikiMultihopQA/proposition_graph/linked_graph.pkl|output/2WikiMultihopQA/persistence_data"
-    ["MuSiQue"]="dataset/MuSiQue/train_data_filtered.json|output/MuSiQue/proposition_graph/linked_graph.pkl|output/MuSiQue/persistence_data"
+    ["HotpotQA"]="dataset/HotpotQA/train_data_filtered.json|output/HotpotQA/proposition_graph/linked_graph.pkl|output/HotpotQA/persistence_data|output/HotpotQA/persistence_data"
+    ["2WikiMultihopQA"]="dataset/2WikiMultihopQA/train_data_filtered.json|output/2WikiMultihopQA/proposition_graph/linked_graph.pkl|output/2WikiMultihopQA/persistence_data|output/2WikiMultihopQA/persistence_data"
+    ["MuSiQue"]="dataset/MuSiQue/train_data_filtered.json|output/MuSiQue/proposition_graph/linked_graph.pkl|output/MuSiQue/persistence_data|output/MuSiQue/persistence_data"
 )
 
 # 串行处理每个数据集（数据集之间串行，内部并行）
@@ -32,7 +32,7 @@ echo "并发度: $CONCURRENCY"
 echo "========================================"
 
 for DATASET_NAME in "HotpotQA" "2WikiMultihopQA" "MuSiQue"; do
-    IFS='|' read -r TRAIN_DATA GRAPH_PATH INDEX_DIR <<< "${DATASETS[$DATASET_NAME]}"
+    IFS='|' read -r TRAIN_DATA GRAPH_PATH INDEX_DIR PERSISTENCE_DIR <<< "${DATASETS[$DATASET_NAME]}"
 
     # 输出路径: ./output/数据集名/result.json
     OUTPUT_PATH="output/${DATASET_NAME}/result.json"
@@ -42,6 +42,7 @@ for DATASET_NAME in "HotpotQA" "2WikiMultihopQA" "MuSiQue"; do
     echo "  训练数据: $TRAIN_DATA"
     echo "  输入图: $GRAPH_PATH"
     echo "  索引目录: $INDEX_DIR"
+    echo "  持久化目录: $PERSISTENCE_DIR"
     echo "  输出结果: $OUTPUT_PATH"
     echo "========================================"
 
@@ -75,6 +76,7 @@ for DATASET_NAME in "HotpotQA" "2WikiMultihopQA" "MuSiQue"; do
         --dataset "$TRAIN_DATA" \
         --graph "$GRAPH_PATH" \
         --index-dir "$INDEX_DIR" \
+        --persistence-dir "$PERSISTENCE_DIR" \
         --output "$OUTPUT_PATH" \
         --concurrency "$CONCURRENCY" \
         --config "$CONFIG_FILE" \

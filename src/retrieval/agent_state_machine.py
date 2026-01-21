@@ -30,6 +30,7 @@ from ..llm.embedding_client import OpenAIEmbeddingClient
 from ..proposition_graph.graph_builder import PROPOSITION_NODE, ENTITY_NODE, GLOBAL_ENTITY_NODE, MENTIONS_ENTITY
 from ..utils.json_parser import extract_json_with_fallback
 from ..utils.llm_response_parser import LLMResponseParser
+from ..utils.timing import TimingLogger
 
 
 class AgentStateMachine:
@@ -57,6 +58,12 @@ class AgentStateMachine:
         embedding_cache_manager: Optional[Any] = None,
         persistence_dir: Optional[str] = None,
         index_dir: Optional[str] = None,
+        enable_timing: bool = True,
+        # 【单例优化】预加载的资源参数
+        adjacency_cache: Optional[Dict[str, Dict[str, List[Dict[str, Any]]]]] = None,
+        predecessors_cache: Optional[Dict[str, List[str]]] = None,
+        proposition_index: Optional[Any] = None,
+        entity_lookup_index: Optional[Any] = None,
     ):
         self.graph = graph
         self.llm = llm
@@ -87,29 +94,45 @@ class AgentStateMachine:
         # JSON 解析器
         self.response_parser = LLMResponseParser(llm)
 
-        # 缓存：向量索引（按需加载）
-        self._proposition_index: Optional[Any] = None
+        # 【性能监控】Timing logger
+        self.timing_logger = TimingLogger(enabled=enable_timing)
+
+        # 【单例优化】优先使用传入的命题索引，避免重复加载
+        self._proposition_index: Optional[Any] = proposition_index
         self._question_embedding_cache: Dict[str, np.ndarray] = {}
 
-        # 【性能优化】邻接表缓存：预构建节点邻居映射
-        self._adjacency_cache: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
-        self._load_or_build_adjacency_cache()
+        # 【单例优化】优先使用传入的邻接缓存，避免重复加载
+        if adjacency_cache is not None:
+            self._adjacency_cache = adjacency_cache
+            self._predecessors_cache = predecessors_cache if predecessors_cache is not None else {}
+        else:
+            # 回退到加载或构建
+            self._adjacency_cache: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+            self._load_or_build_adjacency_cache()
 
-        # 【性能优化】实体查找索引：O(1) 查找
-        from .entity_lookup_index import EntityLookupIndex
-        self._entity_lookup_index = EntityLookupIndex(graph, persistence_dir=persistence_dir)
-        if not self._entity_lookup_index.load():
-            self._entity_lookup_index.build()
+        # 【单例优化】优先使用传入的实体查找索引，避免重复加载
+        if entity_lookup_index is not None:
+            self._entity_lookup_index = entity_lookup_index
+        else:
+            # 回退到加载或构建
+            from .entity_lookup_index import EntityLookupIndex
+            self._entity_lookup_index = EntityLookupIndex(graph, persistence_dir=persistence_dir)
+            if not self._entity_lookup_index.load():
+                self._entity_lookup_index.build()
 
         # 【性能优化】实体名称向量索引：用于模糊匹配（O(log n)复杂度）
-        self._entity_name_index = None
-        if require_vector_index:
-            from .entity_name_index import EntityNameIndex
-            self._entity_name_index = EntityNameIndex(
-                graph=graph,
-                embedding_client=embedding_client,
-                index_path=None  # 可以设置为持久化路径
-            )
+        from .entity_name_index import EntityNameIndex
+        index_path = None
+        if persistence_dir:
+            from pathlib import Path
+            # 使用与预构建文件一致的路径
+            index_path = str(Path(persistence_dir) / "indices" / "entity")
+        self._entity_name_index = EntityNameIndex(
+            graph=graph,
+            embedding_client=embedding_client,
+            index_path=index_path,
+            dim=None  # 自动从元数据获取维度
+        )
 
     async def run(
         self,
@@ -129,134 +152,143 @@ class AgentStateMachine:
         Returns:
             Agent 结果
         """
-        self._verbose = verbose
-        self._debug = debug
+        # Truncate question for timing display
+        question_display = question
 
-        if self._verbose:
-            print("=" * 60)
-            print("ProGraph Agent 开始运行")
-            print(f"问题: {question}")
-            print(f"最大轮数: {self.max_rounds}")
-            if initial_anchors:
-                print(f"初始锚点: {len(initial_anchors)} 个（用户提供）")
-            else:
-                print(f"初始锚点: 自动查找")
-            print("=" * 60)
-
-        # 1. 初始化上下文
-        context = AgentContext.create(
-            question=question,
-            graph=self.graph,
-            max_rounds=self.max_rounds
-        )
-
-        # 添加初始锚点
-        if initial_anchors:
-            await context.anchor_queue.add_anchors(
-                initial_anchors,
-                [1.0] * len(initial_anchors)
-            )
-
-        # 2. 主循环：状态转换
-        termination_reason = "max_rounds_reached"
-
-        while context.can_continue_round():
-            state = context.current_state
+        with self.timing_logger.time(f"Total QA: {question_display}"):
+            self._verbose = verbose
+            self._debug = debug
 
             if self._verbose:
-                print(f"\n--- Round {context.current_round + 1}/{self.max_rounds} ---")
-                print(f"当前状态: {state.value}")
-
-            if state == AgentState.CHECK_PLAN:
-                can_answer = await self._state_check_plan(context)
-                if can_answer:
-                    if self._verbose:
-                        print(f"✓ 信息充足，进入 ANSWER 阶段")
-                    context.transition_to(AgentState.ANSWER)
-                    termination_reason = "information_sufficient"
-                    break
+                print("=" * 60)
+                print("ProGraph Agent 开始运行")
+                print(f"问题: {question}")
+                print(f"最大轮数: {self.max_rounds}")
+                if initial_anchors:
+                    print(f"初始锚点: {len(initial_anchors)} 个（用户提供）")
                 else:
-                    if self._verbose:
-                        print(f"→ 信息不足，进入 RETRIEVE 阶段")
+                    print(f"初始锚点: 自动查找")
+                print("=" * 60)
 
-                    # 记录追踪日志
-                    round_trace = RoundTrace(
-                        round_num=context.current_round,
-                        state_transitions=[AgentState.CHECK_PLAN],
-                        plan_result=context.plan_result,
-                        anchor_count=0,
-                        map_iterations=0,
-                        evidence_count=len(context.collected_evidence),
-                        decision="Check and plan completed"
-                    )
-                    context.trace_log.add_round(round_trace)
+            # 1. 初始化上下文
+            context = AgentContext.create(
+                question=question,
+                graph=self.graph,
+                max_rounds=self.max_rounds
+            )
 
-                    context.transition_to(AgentState.RETRIEVE)
+            # 添加初始锚点
+            if initial_anchors:
+                await context.anchor_queue.add_anchors(
+                    initial_anchors,
+                    [1.0] * len(initial_anchors)
+                )
 
-            elif state == AgentState.RETRIEVE:
-                valid_anchors = await self._state_retrieve(context)
-                if not valid_anchors:
-                    if self._verbose:
-                        print(f"  RETRIEVE: 未找到有效锚点，终止")
-                    context.transition_to(AgentState.ANSWER)
-                    termination_reason = "no_valid_anchors"
-                    break
-                else:
-                    if self._verbose:
-                        print(f"  RETRIEVE: 获得 {len(valid_anchors)} 个有效锚点")
+            # 2. 主循环：状态转换
+            termination_reason = "max_rounds_reached"
 
-                    # 注意：MapState 已在 _state_retrieve 中创建，不需要重复创建
-                    context.transition_to(AgentState.MAP)
-
-            elif state == AgentState.MAP:
-                await self._state_map(context)
-
-                if self._verbose and context.map_state:
-                    top_path = context.map_state.top_paths[0] if context.map_state.top_paths else None
-                    top_score = getattr(top_path, 'normalized_score', getattr(top_path, 'accumulated_score', 0)) if top_path else 0
-                    print(f"  MAP: 探索 {len(context.map_state.explored_paths)} 条路径, Top-1: {top_score:.3f}")
-
-                context.transition_to(AgentState.UPDATE)
-
-            elif state == AgentState.UPDATE:
-                await self._state_update(context)
-
-                # 记录本轮动作历史
-                self._record_round_actions(context)
+            while context.can_continue_round():
+                state = context.current_state
 
                 if self._verbose:
-                    evidence_added = len(context.collected_evidence)
-                    print(f"  UPDATE: 累计证据 {evidence_added} 条")
-                    print(f"    访问实体: {len(context.visited_entities)}")
+                    print(f"\n--- Round {context.current_round + 1}/{self.max_rounds} ---")
+                    print(f"当前状态: {state.value}")
 
-                context.next_round()
-                context.transition_to(AgentState.CHECK_PLAN)
+                if state == AgentState.CHECK_PLAN:
+                    with self.timing_logger.time(f"Round {context.current_round + 1} - CHECK_PLAN"):
+                        can_answer = await self._state_check_plan(context)
+                    if can_answer:
+                        if self._verbose:
+                            print(f"✓ 信息充足，进入 ANSWER 阶段")
+                        context.transition_to(AgentState.ANSWER)
+                        termination_reason = "information_sufficient"
+                        break
+                    else:
+                        if self._verbose:
+                            print(f"→ 信息不足，进入 RETRIEVE 阶段")
 
-            elif state == AgentState.ANSWER:
-                termination_reason = "answer_generated"
-                break
+                        # 记录追踪日志
+                        round_trace = RoundTrace(
+                            round_num=context.current_round,
+                            state_transitions=[AgentState.CHECK_PLAN],
+                            plan_result=context.plan_result,
+                            anchor_count=0,
+                            map_iterations=0,
+                            evidence_count=len(context.collected_evidence),
+                            decision="Check and plan completed"
+                        )
+                        context.trace_log.add_round(round_trace)
 
-        # 3. 生成最终答案（一次 LLM 调用同时生成 answer + short_answer）
-        answer, short_answer = await self._state_answer(context)
+                        context.transition_to(AgentState.RETRIEVE)
 
-        # 4. 返回结果
-        if self._verbose:
-            print("\n" + "=" * 60)
-            print("Agent 运行完成")
-            print(f"终止原因: {termination_reason}")
-            print(f"总轮数: {context.current_round + 1}")
-            print(f"收集证据: {len(context.collected_evidence)} 条")
-            print(f"访问实体: {len(context.visited_entities)} 个")
-            print(f"累计路径: {len(context.accumulated_paths)} 条")
-            print("=" * 60)
+                elif state == AgentState.RETRIEVE:
+                    with self.timing_logger.time(f"Round {context.current_round + 1} - RETRIEVE"):
+                        valid_anchors = await self._state_retrieve(context)
+                    if not valid_anchors:
+                        if self._verbose:
+                            print(f"  RETRIEVE: 未找到有效锚点，终止")
+                        context.transition_to(AgentState.ANSWER)
+                        termination_reason = "no_valid_anchors"
+                        break
+                    else:
+                        if self._verbose:
+                            print(f"  RETRIEVE: 获得 {len(valid_anchors)} 个有效锚点")
 
-        return AgentResult(
-            answer=answer,
-            short_answer=short_answer,
-            confidence=0.7,  # 可以从 answer_generator 中获取
-            trace_log=context.trace_log,
-            collected_evidence=context.collected_evidence,
-            final_paths=[],  # 可以从 context.accumulated_paths 中生成
+                        # 注意：MapState 已在 _state_retrieve 中创建，不需要重复创建
+                        context.transition_to(AgentState.MAP)
+
+                elif state == AgentState.MAP:
+                    with self.timing_logger.time(f"Round {context.current_round + 1} - MAP"):
+                        await self._state_map(context)
+
+                    if self._verbose and context.map_state:
+                        top_path = context.map_state.top_paths[0] if context.map_state.top_paths else None
+                        top_score = getattr(top_path, 'normalized_score', getattr(top_path, 'accumulated_score', 0)) if top_path else 0
+                        print(f"  MAP: 探索 {len(context.map_state.explored_paths)} 条路径, Top-1: {top_score:.3f}")
+
+                    context.transition_to(AgentState.UPDATE)
+
+                elif state == AgentState.UPDATE:
+                    with self.timing_logger.time(f"Round {context.current_round + 1} - UPDATE"):
+                        await self._state_update(context)
+
+                        # 记录本轮动作历史
+                        self._record_round_actions(context)
+
+                    if self._verbose:
+                        evidence_added = len(context.collected_evidence)
+                        print(f"  UPDATE: 累计证据 {evidence_added} 条")
+                        print(f"    访问实体: {len(context.visited_entities)}")
+
+                    context.next_round()
+                    context.transition_to(AgentState.CHECK_PLAN)
+
+                elif state == AgentState.ANSWER:
+                    termination_reason = "answer_generated"
+                    break
+
+            # 3. 生成最终答案（一次 LLM 调用同时生成 answer + short_answer）
+            with self.timing_logger.time("ANSWER - Generate final answer"):
+                answer, short_answer = await self._state_answer(context)
+
+            # 4. 返回结果
+            if self._verbose:
+                print("\n" + "=" * 60)
+                print("Agent 运行完成")
+                print(f"终止原因: {termination_reason}")
+                print(f"总轮数: {context.current_round + 1}")
+                print(f"收集证据: {len(context.collected_evidence)} 条")
+                print(f"访问实体: {len(context.visited_entities)} 个")
+                print(f"累计路径: {len(context.accumulated_paths)} 条")
+                print("=" * 60)
+
+            return AgentResult(
+                answer=answer,
+                short_answer=short_answer,
+                confidence=0.7,  # 可以从 answer_generator 中获取
+                trace_log=context.trace_log,
+                collected_evidence=context.collected_evidence,
+                final_paths=[],  # 可以从 context.accumulated_paths 中生成
             termination_reason=termination_reason
         )
 
@@ -285,11 +317,12 @@ class AgentStateMachine:
 
         try:
             messages = [{"role": "user", "content": prompt}]
-            response = await self.llm.generate(
-                messages=messages,
-                temperature=0.2,  # 介于 CHECK(0.1) 和 PLAN(0.3) 之间
-                max_tokens=512
-            )
+            with self.timing_logger.time("  LLM: Check plan"):
+                response = await self.llm.generate(
+                    messages=messages,
+                    temperature=0.2,  # 介于 CHECK(0.1) 和 PLAN(0.3) 之间
+                    max_tokens=512
+                )
 
             # 解析响应
             result = await self._parse_json_response(response, target_field="can_answer")
@@ -414,11 +447,12 @@ class AgentStateMachine:
             else:
                 gap.rewritten_query = gap.gap_description
 
-        # 2. 分组并行检索
-        gap_to_anchors = await self._retrieve_anchors_by_gaps(
-            context=context,
-            use_rewritten_queries=True
-        )
+        # 2. 分组并行检索（拆分计时）
+        with self.timing_logger.time("  Vector search: Propositions"):
+            gap_to_anchors = await self._retrieve_anchors_by_gaps(
+                context=context,
+                use_rewritten_queries=True
+            )
 
         # 3. 收集所有锚点用于后续处理
         all_anchors = []
@@ -444,7 +478,8 @@ class AgentStateMachine:
         )
 
         # 5. LLM 验证锚点（保持现有逻辑）
-        valid_anchors = await self._validate_anchors(context, prioritized_anchors)
+        with self.timing_logger.time("  LLM: Validate anchors"):
+            valid_anchors = await self._validate_anchors(context, prioritized_anchors)
 
         # 6. 创建或更新 MapState（按意图分组）
         # 对于本轮的每个 InfoGap，保留验证通过的锚点
@@ -652,17 +687,20 @@ class AgentStateMachine:
                 print(f"      - [{sg.intent_label}] {len(sg.frontier_nodes)} 个起点, active_edges={sg.info_gap.active_edges}")
 
         # 3. 并行扩展每个子图（独立 beam search）
-        expand_tasks = []
-        for subgraph in subgraphs:
-            task = self._expand_subgraph(
-                subgraph=subgraph,
-                question=context.question,
-                max_depth=self.map_max_iterations,
-                beam_width=self.map_beam_width
-            )
-            expand_tasks.append(task)
+        with self.timing_logger.time("  Subgraph expansion (beam search)"):
+            expand_tasks = []
+            for subgraph in subgraphs:
+                # 使用意图改写后的查询（如果有）
+                target_query = subgraph.info_gap.rewritten_query or context.question
+                task = self._expand_subgraph(
+                    subgraph=subgraph,
+                    question=target_query,
+                    max_depth=self.map_max_iterations,
+                    beam_width=self.map_beam_width
+                )
+                expand_tasks.append(task)
 
-        await asyncio.gather(*expand_tasks)
+            await asyncio.gather(*expand_tasks)
 
         if self._debug:
             print(f"    [DEBUG] MAP: 子图扩展完成")
@@ -710,10 +748,11 @@ class AgentStateMachine:
             return
 
         # 使用路径选择器进行排序
-        ranked_paths = self.path_selector.select(
-            context.map_state.explored_paths,
-            top_k=10
-        )
+        with self.timing_logger.time("  Path ranking"):
+            ranked_paths = self.path_selector.select(
+                context.map_state.explored_paths,
+                top_k=10
+            )
 
         context.accumulated_paths.extend(ranked_paths)
 
@@ -721,7 +760,8 @@ class AgentStateMachine:
             print(f"    [DEBUG] UPDATE: 排序后路径 {len(ranked_paths)} 条")
 
         # 提取证据
-        extracted = await self._extract_evidence(context, ranked_paths)
+        with self.timing_logger.time("  Evidence extraction"):
+            extracted = await self._extract_evidence(context, ranked_paths)
 
         if self._debug:
             print(f"    [DEBUG] UPDATE: LLM 提取证据 {len(extracted)} 条")
@@ -795,11 +835,12 @@ class AgentStateMachine:
 
         try:
             messages = [{"role": "user", "content": prompt}]
-            response = await self.llm.generate(
-                messages=messages,
-                temperature=0.1,
-                max_tokens=1024
-            )
+            with self.timing_logger.time("  LLM: Generate answer"):
+                response = await self.llm.generate(
+                    messages=messages,
+                    temperature=0.1,
+                    max_tokens=1024
+                )
 
             # 解析答案
             result = await self._parse_json_response(response, target_field=None)
@@ -1052,7 +1093,7 @@ Rules for Answer:
         query_texts: List[str],
         top_k: int = 10
     ) -> List[str]:
-        """批量向量索引检索：每个查询独立检索后合并
+        """批量向量索引检索：使用批量 embedding 和批量搜索优化性能
 
         Args:
             context: Agent 上下文
@@ -1063,29 +1104,32 @@ Rules for Answer:
         Returns:
             合并去重后的命题节点 ID 列表
         """
-        all_anchors = []
+        if not query_texts:
+            return []
 
-        for query_text in query_texts:
-            # 获取查询嵌入
-            query_embedding = await self._get_query_embedding(query_text)
+        # 【性能优化】批量获取所有 embeddings（一次 API 调用）
+        all_embeddings = await self.embedding_client.embed(query_texts)
+        embedding_matrix = np.array(all_embeddings.embeddings)
 
-            # 执行检索
-            anchors = await self._retrieve_from_vector_index(
-                context=context,
-                index=index,
-                query_embedding=query_embedding,
-                top_k=top_k
-            )
+        # 【性能优化】批量搜索（真正的批量查询，HNSW 原生支持）
+        distances, indices, payloads = index.search(
+            query_vectors=embedding_matrix,
+            k=top_k
+        )
 
-            all_anchors.extend(anchors)
-
-        # 去重（保持顺序）
+        # 合并结果并去重
         seen = set()
         unique_anchors = []
-        for anchor in all_anchors:
-            if anchor not in seen:
-                seen.add(anchor)
-                unique_anchors.append(anchor)
+
+        for i in range(len(query_texts)):
+            for j in range(top_k):
+                payload = payloads[i][j]
+                node_id = payload.get('node_id')
+                if node_id and node_id not in seen:
+                    # 确保节点在图中存在
+                    if node_id in self.graph.nodes:
+                        seen.add(node_id)
+                        unique_anchors.append(node_id)
 
         return unique_anchors
 
@@ -1121,16 +1165,17 @@ Rules for Answer:
             top_k=top_k
         )
 
-        # 3. 实体检索（如果有相关实体）
+        # 3. 实体检索（如果有相关实体，使用独立计时）
         entity_anchors = []
         if gap.related_entities:
-            entity_anchors = await self._retrieve_from_entities(
-                context=context,
-                entity_ids=gap.related_entities,
-                query_embedding=query_embedding,
-                top_k_per_entity=3,
-                max_entities=5
-            )
+            with self.timing_logger.time("    Entity retrieval"):
+                entity_anchors = await self._retrieve_from_entities(
+                    context=context,
+                    entity_ids=gap.related_entities,
+                    query_embedding=query_embedding,
+                    top_k_per_entity=3,
+                    max_entities=5
+                )
 
         # 4. 融合去重
         fused_anchors = self._fuse_anchors(proposition_anchors, entity_anchors)
@@ -1260,7 +1305,7 @@ Rules for Answer:
             return []
 
         # 【新增】将实体名称匹配到节点ID
-        entity_node_ids = self._match_entity_names_to_node_ids(entity_ids)
+        entity_node_ids = await self._match_entity_names_to_node_ids(entity_ids)
 
         if not entity_node_ids:
             if self._debug:
@@ -1273,9 +1318,8 @@ Rules for Answer:
         # 限制实体数量
         entity_node_ids = entity_node_ids[:max_entities]
 
-        # 收集所有关联命题
-        all_propositions = {}  # {prop_id: similarity}
-
+        # 【性能优化】先收集所有关联命题（避免在循环中重复处理）
+        all_prop_ids = set()
         for entity_node_id in entity_node_ids:
             # 检查实体是否存在（现在 entity_node_id 是真正的节点ID）
             if entity_node_id not in self.graph:
@@ -1292,30 +1336,43 @@ Rules for Answer:
                 n for n in self._predecessors_cache.get(entity_node_id, [])
                 if self.graph.nodes[n].get("node_type") == PROPOSITION_NODE
             ]
+            
+            # 限制每个实体的命题数量，避免处理过多文本
+            max_props_per_entity = 50  # 限制每个实体最多处理50个命题
+            all_prop_ids.update(proposition_neighbors[:max_props_per_entity])
 
-            # 【性能优化】先收集所有需要 embedding 的命题文本
-            prop_texts_to_embed = []
-            prop_ids_to_embed = []
-            for prop_id in proposition_neighbors:
-                if prop_id not in self.graph or prop_id in all_propositions:
-                    continue
+        if not all_prop_ids:
+            return []
 
-                prop_text = self.graph.nodes[prop_id].get("text", "")
-                if not prop_text:
-                    continue
+        # 【性能优化】批量收集所有需要 embedding 的命题文本（一次性处理）
+        prop_texts_to_embed = []
+        prop_ids_to_embed = []
+        for prop_id in all_prop_ids:
+            if prop_id not in self.graph:
+                continue
 
-                prop_texts_to_embed.append(prop_text)
-                prop_ids_to_embed.append(prop_id)
+            prop_text = self.graph.nodes[prop_id].get("text", "")
+            if not prop_text:
+                continue
 
-            # 【性能优化】批量获取所有 embeddings（一次 API 调用）
-            if prop_texts_to_embed:
+            prop_texts_to_embed.append(prop_text)
+            prop_ids_to_embed.append(prop_id)
+
+        # 【性能优化】批量获取所有 embeddings（一次 API 调用，而不是每个实体一次）
+        all_propositions = {}  # {prop_id: similarity}
+        if prop_texts_to_embed:
+            # 使用缓存管理器如果可用
+            if hasattr(self, 'embedding_cache_manager') and self.embedding_cache_manager:
+                prop_embeddings = await self.embedding_cache_manager.get_embeddings_batch(prop_texts_to_embed)
+                prop_embeddings = [np.array(emb) for emb in prop_embeddings]
+            else:
                 response = await self.embedding_client.embed(prop_texts_to_embed)
-                prop_embeddings = response.embeddings
+                prop_embeddings = [np.array(emb) for emb in response.embeddings]
 
-                # 计算每个命题与查询的相似度
-                for prop_id, prop_embedding in zip(prop_ids_to_embed, prop_embeddings):
-                    similarity = self._cosine_similarity(query_embedding, np.array(prop_embedding))
-                    all_propositions[prop_id] = similarity
+            # 计算每个命题与查询的相似度
+            for prop_id, prop_embedding in zip(prop_ids_to_embed, prop_embeddings):
+                similarity = self._cosine_similarity(query_embedding, np.array(prop_embedding))
+                all_propositions[prop_id] = similarity
 
         # 按相似度排序
         sorted_props = sorted(all_propositions.items(), key=lambda x: x[1], reverse=True)
@@ -1355,138 +1412,39 @@ Rules for Answer:
 
         return fused
 
-    def _match_entity_names_to_node_ids(
+    async def _match_entity_names_to_node_ids(
         self,
         entity_names: List[str]
     ) -> List[str]:
-        """将实体名称匹配到图中的实体节点ID（使用索引优化，O(1)查找）
+        """将实体名称匹配到图中的实体节点ID（批量向量检索）
 
         Args:
             entity_names: 实体名称列表（来自 LLM/InfoGap.related_entities）
 
         Returns:
-            匹配到的实体节点ID列表（优先返回 global_entity）
+            匹配到的实体节点ID列表
         """
+        if not entity_names or not self._entity_name_index:
+            return []
+        
+        if not self._entity_name_index.is_built():
+            return []
+        
+        # 批量向量检索
+        batch_results = await self._entity_name_index.search_batch(
+            queries=entity_names,
+            top_k=1,
+            threshold=0.7
+        )
+        
+        # 展平结果（每个查询取第一个匹配）
         matched_node_ids = []
-
-        for entity_name in entity_names:
-            # 使用索引进行 O(1) 查找
-            node_id = self._entity_lookup_index.lookup(entity_name, prefer_global=True)
-            
-            if node_id:
-                matched_node_ids.append(node_id)
-                continue
-            
-            # 如果精确匹配失败，尝试模糊匹配（仅在必要时）
-            best_match = self._fuzzy_match_entity(entity_name)
-            if best_match:
-                matched_node_ids.append(best_match)
-
+        for results in batch_results:
+            if results:
+                matched_node_ids.append(results[0])
+        
         return matched_node_ids
 
-    def _fuzzy_match_entity(self, entity_name: str) -> Optional[str]:
-        """模糊匹配实体（使用向量搜索替代编辑距离）
-        
-        复杂度：从 O(n×L₁×L₂) 降到 O(log n)
-        
-        Args:
-            entity_name: 实体名称
-            
-        Returns:
-            匹配的节点ID，如果不存在则返回None
-        """
-        # 【性能优化】使用实体名称向量索引搜索
-        if self._entity_name_index and self._entity_name_index.is_built():
-            import asyncio
-            
-            try:
-                # 异步调用向量搜索
-                results = asyncio.run(self._entity_name_index.search(
-                    query=entity_name,
-                    top_k=1,  # 只需要最佳匹配
-                    threshold=0.7  # 阈值与原来编辑距离0.7对应
-                ))
-                
-                if results:
-                    return results[0]
-            except Exception as e:
-                print(f"向量搜索失败，回退到编辑距离: {e}")
-        
-        # 回退到原有的编辑距离算法
-        return self._fuzzy_match_entity_ed(entity_name)
-
-    def _fuzzy_match_entity_ed(self, entity_name: str) -> Optional[str]:
-        """模糊匹配实体（编辑距离回退方法）
-        
-        Args:
-            entity_name: 实体名称
-            
-        Returns:
-            匹配的节点ID，如果不存在则返回None
-        """
-        from ..proposition_graph.graph_builder import ENTITY_NODE, GLOBAL_ENTITY_NODE
-        
-        best_match = None
-        best_similarity = 0.0
-        
-        # 只遍历实体节点
-        for node_id, node_data in self.graph.nodes(data=True):
-            if node_data.get("node_type") not in [ENTITY_NODE, GLOBAL_ENTITY_NODE]:
-                continue
-            
-            node_text = node_data.get("text", "")
-            similarity = self._fuzzy_similarity(entity_name, node_text)
-            
-            if similarity > best_similarity and similarity > 0.7:
-                best_similarity = similarity
-                best_match = node_id
-        
-        return best_match
-
-    def _fuzzy_similarity(self, str1: str, str2: str) -> float:
-        """计算两个字符串的模糊相似度
-
-        使用简单的编辑距离算法，忽略大小写。
-        """
-        str1_lower = str1.lower()
-        str2_lower = str2.lower()
-
-        # 如果完全相同
-        if str1_lower == str2_lower:
-            return 1.0
-
-        # 简单的包含关系
-        if str1_lower in str2_lower or str2_lower in str1_lower:
-            return 0.9
-
-        # 编辑距离（Levenshtein距离）
-        len1, len2 = len(str1_lower), len(str2_lower)
-
-        # 动态规划矩阵
-        dp = [[0] * (len2 + 1) for _ in range(len1 + 1)]
-
-        for i in range(len1 + 1):
-            dp[i][0] = i
-        for j in range(len2 + 1):
-            dp[0][j] = j
-
-        for i in range(1, len1 + 1):
-            for j in range(1, len2 + 1):
-                if str1_lower[i-1] == str2_lower[j-1]:
-                    cost = 0
-                else:
-                    cost = 1
-                dp[i][j] = min(
-                    dp[i-1][j] + 1,      # 删除
-                    dp[i][j-1] + 1,      # 插入
-                    dp[i-1][j-1] + cost  # 替换
-                )
-
-        max_len = max(len1, len2)
-        if max_len == 0:
-            return 0.0
-
-        return 1.0 - (dp[len1][len2] / max_len)
 
     def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
         """计算余弦相似度"""
@@ -1555,10 +1513,19 @@ Rules for Answer:
                     neighbor_data = self.graph.nodes[neighbor]
                     neighbor_type = neighbor_data.get("node_type", "")
 
-                    # 存储邻居信息
+                    # 【修复】规范化边类型（处理遗留的 RST 边类型）
+                    from ..proposition_graph.rst_analyzer import normalize_edge_type
+                    if edge_type != MENTIONS_ENTITY and neighbor_type == PROPOSITION_NODE:
+                        # 只规范化命题之间的边类型
+                        normalized_edge_type = normalize_edge_type(edge_type)
+                    else:
+                        normalized_edge_type = edge_type
+
+                    # 存储邻居信息（使用规范化后的边类型）
                     neighbor_info = {
                         "id": neighbor,
-                        "edge_type": edge_type
+                        "edge_type": normalized_edge_type,
+                        "original_edge_type": edge_type  # 保留原始类型以备需要
                     }
 
                     if neighbor_type in neighbors_by_type:
@@ -1602,9 +1569,14 @@ Rules for Answer:
 
         neighbors_by_type = self._adjacency_cache[current_node]
 
-        # 1. 命题节点：必须通过 active_edges 连接
+        # 【修复】规范化 active_edges 以匹配规范化后的边类型
+        from ..proposition_graph.rst_analyzer import normalize_edge_type
+        normalized_active_edges = {normalize_edge_type(e) if e != MENTIONS_ENTITY else e for e in active_edges}
+
+        # 1. 命题节点：必须通过 active_edges 连接（使用规范化后的边类型匹配）
         for neighbor_info in neighbors_by_type.get(PROPOSITION_NODE, []):
-            if neighbor_info["edge_type"] in active_edges:
+            # 检查规范化后的边类型是否在 active_edges 中
+            if neighbor_info["edge_type"] in normalized_active_edges:
                 candidates.append((neighbor_info["id"], PROPOSITION_NODE))
 
         # 2. 实体节点：总是包含（通过 MENTIONS_ENTITY 边）
@@ -1616,6 +1588,23 @@ Rules for Answer:
         for neighbor_info in neighbors_by_type.get(GLOBAL_ENTITY_NODE, []):
             if neighbor_info["edge_type"] == MENTIONS_ENTITY:
                 candidates.append((neighbor_info["id"], GLOBAL_ENTITY_NODE))
+        
+        # 【修复】4. 如果当前节点是实体，也考虑通过 MENTIONS_ENTITY 反向边连接的命题节点
+        # （处理缺少反向边的情况，使 MENTIONS_ENTITY 真正双向）
+        current_node_data = self.graph.nodes.get(current_node, {})
+        if current_node_data.get("node_type") in [ENTITY_NODE, GLOBAL_ENTITY_NODE]:
+            # 查找通过 MENTIONS_ENTITY 边指向当前实体的命题节点
+            for pred in self._predecessors_cache.get(current_node, []):
+                if pred not in self.graph:
+                    continue
+                pred_data = self.graph.nodes[pred]
+                if pred_data.get("node_type") == PROPOSITION_NODE:
+                    # 检查是否有 MENTIONS_ENTITY 边
+                    if self.graph.has_edge(pred, current_node):
+                        edge_data = self.graph[pred][current_node]
+                        if edge_data.get("edge_type") == MENTIONS_ENTITY:
+                            # 添加该命题节点作为候选（通过实体桥接）
+                            candidates.append((pred, PROPOSITION_NODE))
 
         return candidates
 
@@ -1626,7 +1615,11 @@ Rules for Answer:
         visited_entities: Set[str],
     ) -> List[tuple]:
         """获取候选节点的回退方法（用于动态添加的节点）"""
+        from ..proposition_graph.rst_analyzer import normalize_edge_type
         candidates = []
+
+        # 【修复】规范化 active_edges
+        normalized_active_edges = {normalize_edge_type(e) if e != MENTIONS_ENTITY else e for e in active_edges}
 
         for neighbor in self.graph.neighbors(current_node):
             if self.graph.has_edge(current_node, neighbor):
@@ -1636,11 +1629,24 @@ Rules for Answer:
                 neighbor_type = neighbor_data.get("node_type", "")
 
                 if neighbor_type == PROPOSITION_NODE:
-                    if edge_type in active_edges:
+                    # 规范化边类型并匹配
+                    normalized_type = normalize_edge_type(edge_type)
+                    if normalized_type in normalized_active_edges:
                         candidates.append((neighbor, neighbor_type))
                 elif neighbor_type in [ENTITY_NODE, GLOBAL_ENTITY_NODE]:
                     if edge_type == MENTIONS_ENTITY:
                         candidates.append((neighbor, neighbor_type))
+        
+        # 【修复】如果当前节点是实体，也考虑反向 MENTIONS_ENTITY 边
+        current_node_data = self.graph.nodes.get(current_node, {})
+        if current_node_data.get("node_type") in [ENTITY_NODE, GLOBAL_ENTITY_NODE]:
+            for pred in self.graph.predecessors(current_node):
+                if self.graph.has_edge(pred, current_node):
+                    edge_data = self.graph[pred][current_node]
+                    if edge_data.get("edge_type") == MENTIONS_ENTITY:
+                        pred_data = self.graph.nodes.get(pred, {})
+                        if pred_data.get("node_type") == PROPOSITION_NODE:
+                            candidates.append((pred, PROPOSITION_NODE))
 
         return candidates
 
@@ -1796,6 +1802,12 @@ Rules for Answer:
 
             # 扩展路径（添加的都是命题节点ID）
             for score in all_scores:
+                # 【防止循环】跳过已经在路径中的节点
+                if score.node_id in path.nodes:
+                    if self._debug:
+                        print(f"    [DEBUG] 跳过路径中的重复节点: {score.node_id}")
+                    continue
+
                 new_path = path.copy()
                 new_entities = self._get_new_entities(score.node_id, path.visited_entities)
                 new_path.add_node(score.node_id, score.total_score, new_entities, graph=self.graph)
@@ -2058,7 +2070,7 @@ Rules for Answer:
             return []
 
         # 如果候选数量较少，使用批处理
-        if len(candidates) <= 10:
+        if len(candidates) <= 15:
             return await self._batch_validate_anchors(context, candidates)
 
         # 否则分批处理
@@ -2305,8 +2317,10 @@ Rules for Answer:
         """
         # 获取起点分数
         if start_nodes:
+            # 使用意图改写后的查询（如果有）
+            target_query = subgraph.info_gap.rewritten_query or context.question
             scores = await self.path_scorer.score_nodes(
-                question=context.question,
+                question=target_query,
                 candidate_nodes=start_nodes,
                 visited_entities=set(),
             )
@@ -2480,7 +2494,11 @@ Rules for Answer:
             new_frontier = set()
             for from_node, to_node, score in all_expansions[:beam_width]:
                 # 【防止循环】跳过已经在子图中的节点
+                # 注意：这里跳过所有已存在节点，确保子图保持树形结构（每个节点只有一个父节点）
+                # 如果需要 DAG（允许多父节点），需要额外检查 nx.has_path(subgraph.graph, to_node, from_node)
                 if to_node in subgraph.graph:
+                    if self._debug:
+                        print(f"    [DEBUG] 跳过子图中的重复节点: {to_node}")
                     continue
 
                 # 添加边
@@ -2562,10 +2580,6 @@ Rules for Answer:
         all_paths = []
 
         def dfs(current: str, path: List[str]):
-            # 循环检测：防止图中双向边导致无限递归
-            if current in path:
-                return
-
             successors = list(graph.successors(current))
             if not successors:
                 # 叶子节点，保存路径
@@ -2573,10 +2587,19 @@ Rules for Answer:
                 return
 
             # 继续扩展
+            valid_successors = []
             for next_node in successors:
+                # 循环检测：next_node 不能在当前路径中（防止环）
+                if next_node in path:
+                    continue
+                valid_successors.append(next_node)
                 path.append(next_node)
                 dfs(next_node, path)
                 path.pop()
+
+            # 如果所有后继都被跳过（都在 path 中），当前路径也是有效终点
+            if not valid_successors and successors:
+                all_paths.append(path.copy())
 
         dfs(start, [start])
 

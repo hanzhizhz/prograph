@@ -38,18 +38,22 @@ class PersistentHNSWIndex:
         self.M = M
         self.ef_construction = ef_construction
 
-        # 初始化索引
-        self.index = hnswlib.Index(space='cosine', dim=dim)
-        self.index.init_index(max_elements=max_elements, M=M, ef_construction=ef_construction)
-
         # 元数据映射：label_index -> payload
         # payload包含: node_id, node_type, field, retrieval_idx, text_digest
         self.label_to_payload: Dict[int, Dict[str, Any]] = {}
         self.n_vectors = 0
+        self._index_initialized = False
 
-        # 如果提供了路径且文件存在，尝试加载
+        # 如果提供了路径且文件存在，直接加载（不先初始化）
         if index_path and self._exists(index_path):
+            self.index = hnswlib.Index(space='cosine', dim=dim)
             self.load(index_path)
+            self._index_initialized = True
+        else:
+            # 否则初始化空索引（用于构建新索引）
+            self.index = hnswlib.Index(space='cosine', dim=dim)
+            self.index.init_index(max_elements=max_elements, M=M, ef_construction=ef_construction)
+            self._index_initialized = True
 
     def _exists(self, index_path: str) -> bool:
         """检查索引文件是否存在"""
@@ -75,6 +79,13 @@ class PersistentHNSWIndex:
 
         if len(payloads) != len(vectors):
             raise ValueError(f"payloads 长度 ({len(payloads)}) 与 vectors 长度 ({len(vectors)}) 不匹配")
+
+        # 如果索引未初始化（从文件加载后可能未初始化），现在初始化
+        if not self._index_initialized:
+            if not hasattr(self, 'index') or self.index is None:
+                self.index = hnswlib.Index(space='cosine', dim=self.dim)
+            self.index.init_index(max_elements=self.max_elements, M=self.M, ef_construction=self.ef_construction)
+            self._index_initialized = True
 
         # 【性能优化】直接使用向量，hnswlib 的 cosine 空间会自动归一化
         vectors_f32 = vectors.astype(np.float32)

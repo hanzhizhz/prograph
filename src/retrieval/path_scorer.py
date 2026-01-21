@@ -57,6 +57,8 @@ class PathScorer:
         embedding_cache_manager: Optional['EmbeddingCacheManager'] = None,
         adjacency_cache: Optional[Dict[str, Dict[str, List[Dict[str, Any]]]]] = None,
         persistence_dir: Optional[str] = None,
+        global_stats: Optional[Dict[str, float]] = None,
+        proposition_index: Optional[Any] = None,
     ):
         self.graph = graph
         self.embedding_client = embedding_client
@@ -75,7 +77,6 @@ class PathScorer:
 
         # 节点嵌入缓存（从索引加载或实时计算）
         self._node_embedding_cache: Dict[str, np.ndarray] = {}
-        self._proposition_index = None
 
         # 批量嵌入配置
         self._batch_size = 50  # 批量嵌入大小
@@ -83,12 +84,24 @@ class PathScorer:
         # 全局实体统计（预计算）
         self._global_entity_stats: Dict[str, float]
 
-        # 如果提供了索引目录，尝试加载
-        if index_dir:
-            self._load_index()
+        # 【单例优化】优先使用传入的命题索引，避免重复加载
+        if proposition_index is not None:
+            self._proposition_index = proposition_index
+            # 从索引预加载节点嵌入到缓存
+            if not self._node_embedding_cache:
+                self._preload_node_embeddings_from_index()
+        else:
+            self._proposition_index = None
+            # 如果提供了索引目录但没有传入索引，尝试加载
+            if index_dir:
+                self._load_index()
 
-        # 预计算全局统计（优先从文件加载）
-        self._global_entity_stats = self._load_or_compute_global_statistics()
+        # 【单例优化】优先使用传入的全局统计，避免重复加载
+        if global_stats is not None:
+            self._global_entity_stats = global_stats
+        else:
+            # 回退到加载或计算
+            self._global_entity_stats = self._load_or_compute_global_statistics()
 
     async def score_nodes(
         self,
@@ -187,6 +200,33 @@ class PathScorer:
 
         return float(similarity)
 
+    def _preload_node_embeddings_from_index(self):
+        """
+        从已加载的命题索引预加载节点嵌入到缓存
+        
+        【单例优化】当索引通过参数传入时，使用此方法预加载嵌入，
+        避免在 _load_index 中重复加载索引。
+        """
+        if self._proposition_index is None:
+            return
+        
+        try:
+            # 预加载所有节点嵌入到缓存
+            # 【性能优化】使用批量获取，大幅提升预加载速度
+            all_labels = list(self._proposition_index.label_to_payload.keys())
+            all_vectors = self._proposition_index.get_vectors(all_labels)
+
+            # 批量缓存
+            for label, vector in zip(all_labels, all_vectors):
+                if vector is not None:
+                    payload = self._proposition_index.label_to_payload.get(label)
+                    if payload:
+                        node_id = payload.get('node_id')
+                        if node_id:
+                            self._node_embedding_cache[node_id] = vector
+        except Exception as e:
+            print(f"警告：从索引预加载嵌入失败 ({e})")
+
     def _load_index(self):
         """
         加载预构建的向量索引
@@ -214,20 +254,8 @@ class PathScorer:
             # load() 方法期望的路径是索引文件的路径（不含扩展名）
             self._proposition_index.load(str(index_path / index_path.name))
 
-            # 预加载所有节点嵌入到缓存
-            # 注意：这需要较大的内存，可以根据需要调整
-            # 【性能优化】使用批量获取，大幅提升预加载速度
-            all_labels = list(self._proposition_index.label_to_payload.keys())
-            all_vectors = self._proposition_index.get_vectors(all_labels)
-
-            # 批量缓存
-            for label, vector in zip(all_labels, all_vectors):
-                if vector is not None:
-                    payload = self._proposition_index.label_to_payload.get(label)
-                    if payload:
-                        node_id = payload.get('node_id')
-                        if node_id:
-                            self._node_embedding_cache[node_id] = vector
+            # 使用共用方法预加载嵌入
+            self._preload_node_embeddings_from_index()
         except Exception as e:
             # 索引加载失败，回退到实时计算
             print(f"警告：索引加载失败 ({e})，将使用实时计算")

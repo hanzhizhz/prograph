@@ -197,21 +197,21 @@ class OpenAIEmbeddingClient(BaseEmbedding):
         """
         self._ensure_client()
 
-        async with self._semaphore:
-            response = await self._client.embeddings.create(
-                model=self.model,
-                input=texts,
-                **kwargs
-            )
+        
+        response = await self._client.embeddings.create(
+            model=self.model,
+            input=texts,
+            **kwargs
+        )
 
-            embeddings = [item.embedding for item in response.data]
-            prompt_tokens = response.usage.prompt_tokens
+        embeddings = [item.embedding for item in response.data]
+        prompt_tokens = response.usage.prompt_tokens
 
-            return EmbeddingResponse(
-                embeddings=embeddings,
-                model=self.model,
-                prompt_tokens=prompt_tokens
-            )
+        return EmbeddingResponse(
+            embeddings=embeddings,
+            model=self.model,
+            prompt_tokens=prompt_tokens
+        )
 
     async def embed_single(
         self,

@@ -7,6 +7,7 @@ from .json_parser import (
     JsonParserWithRetry,
     retry_parse_with_llm
 )
+from .timing import TimingLogger, TimingContext
 
 __all__ = [
     'setup_logging',
@@ -14,5 +15,7 @@ __all__ = [
     'ParseErrorRecord',
     'extract_json_with_fallback',
     'JsonParserWithRetry',
-    'retry_parse_with_llm'
+    'retry_parse_with_llm',
+    'TimingLogger',
+    'TimingContext'
 ]

@@ -100,10 +100,17 @@ async def initialize_resources(
     )
     print("✓ Embedding 缓存管理器已初始化（仅内存缓存）")
 
-    # 6. 加载持久化数据（如果可用）
+    # 6. 集中加载所有持久化数据（单例模式）
     adjacency_cache = None
+    predecessors_cache = None
+    global_stats = None
+    entity_lookup_index = None
+    
     if persistence_dir:
-        cache_file = Path(persistence_dir) / "adjacency_cache.pkl"
+        persistence_path = Path(persistence_dir)
+        
+        # 6.1 加载邻接缓存
+        cache_file = persistence_path / "adjacency_cache.pkl"
         if cache_file.exists():
             try:
                 with open(cache_file, 'rb') as f:
@@ -111,8 +118,55 @@ async def initialize_resources(
                 print(f"✓ 邻接缓存已加载: {len(adjacency_cache)} 个节点")
             except Exception as e:
                 print(f"警告: 邻接缓存加载失败 ({e})")
+        
+        # 6.2 加载前驱缓存
+        pred_file = persistence_path / "predecessors_cache.pkl"
+        if pred_file.exists():
+            try:
+                with open(pred_file, 'rb') as f:
+                    predecessors_cache = pickle.load(f)
+                print(f"✓ 前驱缓存已加载: {len(predecessors_cache)} 个节点")
+            except Exception as e:
+                print(f"警告: 前驱缓存加载失败 ({e})")
+        
+        # 6.3 加载全局统计
+        stats_file = persistence_path / "global_stats.json"
+        if stats_file.exists():
+            try:
+                with open(stats_file, 'r', encoding='utf-8') as f:
+                    global_stats = json.load(f)
+                print(f"✓ 全局统计已加载: norm={global_stats.get('norm', 'N/A')}")
+            except Exception as e:
+                print(f"警告: 全局统计加载失败 ({e})")
+        
+        # 6.4 加载实体查找索引
+        from src.retrieval.entity_lookup_index import EntityLookupIndex
+        entity_lookup_index = EntityLookupIndex(graph, persistence_dir=persistence_dir)
+        if entity_lookup_index.load():
+            print(f"✓ 实体查找索引已加载")
+        else:
+            print("构建实体查找索引...")
+            entity_lookup_index.build()
+            print(f"✓ 实体查找索引已构建")
+    
+    # 6.5 加载命题向量索引（如果提供了 index_dir）
+    proposition_index = None
+    if index_dir:
+        from src.retrieval.vector_index import PersistentHNSWIndex
+        index_path = Path(index_dir) / "indices" / "proposition"
+        meta_file = index_path / f"{index_path.name}.meta.json"
+        if meta_file.exists():
+            try:
+                with open(meta_file, 'r', encoding='utf-8') as f:
+                    meta_data = json.load(f)
+                    dim = meta_data.get('dim', 1024)
+                proposition_index = PersistentHNSWIndex(dim=dim)
+                proposition_index.load(str(index_path / index_path.name))
+                print(f"✓ 命题向量索引已加载: dim={dim}")
+            except Exception as e:
+                print(f"警告: 命题向量索引加载失败 ({e})")
 
-    # 7. 初始化检索组件（一次性）
+    # 7. 初始化检索组件（一次性，传入预加载的资源）
     print("初始化检索组件...")
 
     path_scorer = PathScorer(
@@ -124,11 +178,13 @@ async def initialize_resources(
         embedding_cache_manager=cache_manager,
         adjacency_cache=adjacency_cache,
         persistence_dir=persistence_dir,
+        global_stats=global_stats,              # 传入预加载的全局统计
+        proposition_index=proposition_index,    # 传入预加载的命题索引
     )
 
     path_selector = PathSelector(graph=graph)
 
-    # 创建 AgentStateMachine（内部会创建 BeamSearch）
+    # 创建 AgentStateMachine（传入预加载的资源，避免重复加载）
     agent_machine = AgentStateMachine(
         graph=graph,
         llm=llm_client,
@@ -140,13 +196,26 @@ async def initialize_resources(
         bridge_weight=retrieval_config.bridge_weight,
         map_beam_width=retrieval_config.beam_width,
         map_max_iterations=retrieval_config.max_path_depth,
-        require_vector_index=False,
         embedding_cache_manager=cache_manager,
         persistence_dir=persistence_dir,
         index_dir=index_dir,
+        enable_timing=True,
+        adjacency_cache=adjacency_cache,            # 传入预加载的邻接缓存
+        predecessors_cache=predecessors_cache,      # 传入预加载的前驱缓存
+        proposition_index=proposition_index,        # 传入预加载的命题索引
+        entity_lookup_index=entity_lookup_index,    # 传入预加载的实体查找索引
     )
 
     print("✓ 所有检索组件已初始化（使用 AgentStateMachine）")
+    
+    # 预先加载实体名称向量索引（避免并发任务各自构建）
+    if agent_machine._entity_name_index and not agent_machine._entity_name_index.is_built():
+        if not agent_machine._entity_name_index.load():
+            print("构建实体名称向量索引（首次运行）...")
+            await agent_machine._entity_name_index.build()
+        else:
+            print("✓ 实体名称索引已加载")
+    
     print("=" * 60)
 
     return (graph, llm_client, embedding_client, agent_machine)
@@ -158,6 +227,7 @@ async def process_single_question(
     embedding_client,
     agent_machine,
     index_dir: Optional[str] = None,
+    verbose: bool = False,
 ) -> dict:
     """
     处理单个问题（使用 AgentStateMachine）
@@ -170,12 +240,13 @@ async def process_single_question(
         embedding_client: 预初始化的 Embedding 客户端
         agent_machine: 预初始化的 AgentStateMachine
         index_dir: 预构建索引目录（可选）
+        verbose: 是否输出详细日志（包括timing）
 
     Returns:
         AgentResult（包含 answer / short_answer 等）
     """
-    # 【性能优化】关闭 debug 和 verbose 以减少 I/O 阻塞
-    result = await agent_machine.run(question=question, debug=False, verbose=False)
+    # 【性能优化】可选择开启 verbose 以查看 timing 日志
+    result = await agent_machine.run(question=question, debug=False, verbose=verbose)
 
     return result
 
@@ -242,12 +313,14 @@ async def run_batch(
 
             try:
                 # 传递共享资源（使用 agent_machine）
+                # 启用 verbose 以显示 timing 日志
                 result = await process_single_question(
                     question=question,
                     graph=graph,
                     embedding_client=embedding_client,
                     agent_machine=agent_machine,
                     index_dir=index_dir,
+                    verbose=True,  # 启用 timing 日志
                 )
 
                 return {
@@ -411,7 +484,7 @@ def main():
             print(f"问题: {args.question}")
             print()
 
-            result = await agent_machine.run(question=args.question)
+            result = await agent_machine.run(question=args.question, verbose=True)
 
             # 输出答案
             print("\n" + "=" * 60)
