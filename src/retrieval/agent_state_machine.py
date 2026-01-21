@@ -916,14 +916,6 @@ class AgentStateMachine:
         # 5. 更新叶子节点供下一轮使用
         context.prev_leaf_nodes = context.map_state.leaf_nodes.copy()
 
-        # 6. 从访问的实体补充锚点队列
-        if context.map_state.visited_entities:
-            await context.anchor_queue.refill_from_entities(
-                entity_ids=list(context.map_state.visited_entities),
-                embedding_client=self.embedding_client,
-                top_k_per_entity=3
-            )
-
     def _reconstruct_document(self, doc_id: str) -> str:
         """从图节点重建文档内容"""
         # 优先使用 pre-built mapping
@@ -1073,7 +1065,7 @@ class AgentStateMachine:
                 context.update_gap_result(gap_result)
                 
                 # 记录下一步提示（仅 continue 状态时）
-                if status_str == "continue" and next_hint:
+                if status_str in ["continue", "partially_satisfied"] and next_hint:
                     next_hints[matched_gap.gap_id] = next_hint
             
             # 选择需要添加的文档
