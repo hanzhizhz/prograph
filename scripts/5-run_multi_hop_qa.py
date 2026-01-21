@@ -8,8 +8,10 @@ import asyncio
 import sys
 import pickle
 import json
+import re
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict
+from collections import Counter
 import argparse
 
 # 添加 src 路径到 sys.path
@@ -22,6 +24,167 @@ from src.retrieval import (
     PathSelector,
     AgentStateMachine
 )
+
+
+def normalize_answer(text: str) -> str:
+    """
+    规范化答案文本用于评估
+
+    遵循 MRQA 官方评估方法的规范化步骤：
+    1. 转换为小写
+    2. 移除标点符号（保留连字符和空格内的字符）
+    3. 移除文章（a, an, the）
+    4. 压缩空白字符
+
+    Args:
+        text: 原始答案文本
+
+    Returns:
+        规范化后的答案文本
+    """
+    if text is None or not isinstance(text, str):
+        return ""
+
+    # 转换为小写
+    text = text.lower()
+
+    # 移除标点符号（保留字母、数字、空格）
+    # 保留连字符（如 "co-operate"）和缩略词（如 "u.s."）中的点
+    text = re.sub(r'[^\w\s\.\-]', '', text)
+
+    # 移除文章
+    articles = ['a ', 'an ', 'the ']
+    for article in articles:
+        text = text.replace(article, ' ')
+
+    # 压缩空白字符
+    text = re.sub(r'\s+', ' ', text)
+
+    # 去除首尾空白
+    text = text.strip()
+
+    return text
+
+
+def compute_exact_match(gold: str, predicted: str) -> float:
+    """
+    计算精确匹配分数
+
+    Args:
+        gold: 标准答案
+        predicted: 预测答案
+
+    Returns:
+        1.0 如果规范化后完全匹配，否则 0.0
+    """
+    gold_normalized = normalize_answer(gold)
+    predicted_normalized = normalize_answer(predicted)
+
+    return 1.0 if gold_normalized == predicted_normalized else 0.0
+
+
+def compute_f1(gold: str, predicted: str) -> float:
+    """
+    计算 F1 分数
+
+    Args:
+        gold: 标准答案
+        predicted: 预测答案
+
+    Returns:
+        F1 分数
+    """
+    gold_normalized = normalize_answer(gold)
+    predicted_normalized = normalize_answer(predicted)
+
+    gold_tokens = gold_normalized.split()
+    predicted_tokens = predicted_normalized.split()
+
+    if not gold_tokens and not predicted_tokens:
+        return 1.0
+    if not gold_tokens or not predicted_tokens:
+        return 0.0
+
+    # 计算公共 token
+    common = Counter(predicted_tokens) & Counter(gold_tokens)
+    num_same = sum(common.values())
+
+    if num_same == 0:
+        return 0.0
+
+    # 计算 precision 和 recall
+    precision = num_same / len(predicted_tokens)
+    recall = num_same / len(gold_tokens)
+
+    # 计算 F1
+    f1 = 2 * (precision * recall) / (precision + recall)
+
+    return f1
+
+
+def evaluate_results(results: List[Dict]) -> Dict:
+    """
+    评估结果列表，返回 EM 和 F1 分数
+
+    使用 short_answer 字段进行评估。
+
+    Args:
+        results: 结果列表，每个元素包含 'short_answer' 和 'reference_answer' 字段
+
+    Returns:
+        包含评估结果的字典：
+        {
+            'total_samples': int,
+            'exact_match': float,
+            'f1_score': float,
+            'em_correct': int,
+            'f1_sum': float
+        }
+    """
+    if not results:
+        return {
+            'total_samples': 0,
+            'exact_match': 0.0,
+            'f1_score': 0.0,
+            'em_correct': 0,
+            'f1_sum': 0.0
+        }
+
+    em_correct = 0
+    f1_sum = 0.0
+
+    for item in results:
+        short_answer = item.get('short_answer', '')
+        reference_answer = item.get('reference_answer', '')
+
+        # 处理可能的多个标准答案
+        if isinstance(reference_answer, list):
+            gold_answers = reference_answer
+        else:
+            gold_answers = [reference_answer]
+
+        # 计算 EM（取所有 gold 答案中的最高分）
+        em_scores = [compute_exact_match(gold, short_answer) for gold in gold_answers]
+        em = max(em_scores)
+
+        # 计算 F1（取所有 gold 答案中的最高分）
+        f1_scores = [compute_f1(gold, short_answer) for gold in gold_answers]
+        f1 = max(f1_scores)
+
+        em_correct += int(em)
+        f1_sum += f1
+
+    total = len(results)
+    em_score = em_correct / total if total > 0 else 0.0
+    f1_score = f1_sum / total if total > 0 else 0.0
+
+    return {
+        'total_samples': total,
+        'exact_match': em_score,
+        'f1_score': f1_score,
+        'em_correct': em_correct,
+        'f1_sum': f1_sum
+    }
 
 
 async def initialize_resources(
@@ -364,6 +527,16 @@ async def run_batch(
         json.dump(results, f, ensure_ascii=False, indent=2)
 
     print(f"完成！处理 {len(results)}/{len(data)} 个问题")
+
+    # 【新增】评估结果（使用 short_answer）
+    print("\n" + "=" * 60)
+    print("评估结果（使用 short_answer）")
+    print("=" * 60)
+    eval_result = evaluate_results(results)
+    print(f"总样本数: {eval_result['total_samples']}")
+    print(f"Exact Match (EM): {eval_result['exact_match']:.4f} ({eval_result['em_correct']}/{eval_result['total_samples']})")
+    print(f"F1 Score: {eval_result['f1_score']:.4f}")
+    print("=" * 60)
 
     # 【新增】清理资源
     await llm_client.close()

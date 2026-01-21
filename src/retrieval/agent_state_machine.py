@@ -20,7 +20,8 @@ from .agent_data_structures import (
 )
 from .agent_prompts import (
     get_check_plan_prompt, get_anchor_judge_prompt,
-    get_extract_from_docs_prompt, get_gap_satisfaction_prompt
+    get_extract_from_docs_prompt, get_gap_satisfaction_prompt,
+    get_forced_answer_prompt
 )
 from .path_scorer import PathScorer, NodeScore
 from .path_structures import Path
@@ -309,8 +310,12 @@ class AgentStateMachine:
                     break
 
             # 3. 生成最终答案（一次 LLM 调用同时生成 answer + short_answer）
+            is_forced = (termination_reason != "information_sufficient" and termination_reason != "answer_generated")
+            if is_forced and self._verbose:
+                print(f"\n[强制回答] 触发强制回答模式 (原因: {termination_reason})")
+                
             with self.timing_logger.time("ANSWER - Generate final answer"):
-                answer, short_answer = await self._state_answer(context)
+                answer, short_answer = await self._state_answer(context, is_forced=is_forced)
 
             # 4. 返回结果
             if self._verbose:
@@ -321,6 +326,7 @@ class AgentStateMachine:
                 print(f"上下文文档: {len(context.context_documents)} 个")
                 print(f"访问实体: {len(context.visited_entities)} 个")
                 print(f"累计路径: {len(context.accumulated_paths)} 条")
+                print(f"回答: {short_answer}")
                 print("=" * 60)
 
             return AgentResult(
@@ -1101,7 +1107,7 @@ class AgentStateMachine:
         short = re.sub(r"[。．\.!！\?？;；,:，]+$", "", short).strip()
         return short
 
-    async def _state_answer(self, context: AgentContext) -> tuple[str, str]:
+    async def _state_answer(self, context: AgentContext, is_forced: bool = False) -> tuple[str, str]:
         """ANSWER: 一次生成自然语言 answer + 可评测 short_answer"""
         # 直接使用文档格式（不限制数量和内容长度）
         recent_docs = context.get_context_documents()
@@ -1114,13 +1120,20 @@ class AgentStateMachine:
         history = context.trace_log.get_recent_context(3)
 
         if self._debug:
-            print(f"    [DEBUG] ANSWER 输入: {len(recent_docs)} 个文档 ({len(evidence)} 条证据)")
+            print(f"    [DEBUG] ANSWER 输入: {len(recent_docs)} 个文档 ({len(evidence)} 条证据), is_forced={is_forced}")
 
         # 格式化证据
         evidence_text = self._format_evidence(evidence)
 
         # 构造 prompt
-        prompt = f"""你是一个专业的问答助手。请根据以下证据回答问题。
+        if is_forced:
+            prompt = get_forced_answer_prompt(
+                question=context.question,
+                evidence=evidence,
+                history=history
+            )
+        else:
+            prompt = f"""你是一个专业的问答助手。请根据以下证据回答问题。
 
 **问题：**
 {context.question}
@@ -1129,12 +1142,12 @@ class AgentStateMachine:
 {evidence_text}
 """
 
-        # 添加探索历史
-        if history:
-            prompt = f"{prompt}\n\n**探索历史：**\n{history}"
+            # 添加探索历史
+            if history:
+                prompt = f"{prompt}\n\n**探索历史：**\n{history}"
 
-        # 要求 JSON 格式输出（同时包含 short_answer）
-        prompt = f"""{prompt}
+            # 要求 JSON 格式输出（同时包含 short_answer）
+            prompt = f"""{prompt}
 
 **输出格式：**
 请以 JSON 格式返回答案，格式如下（必须同时包含两个字段）：
@@ -1148,7 +1161,7 @@ class AgentStateMachine:
 **short_answer 规则：**
 - 只输出最终答案本身，不要解释
 - 不要在末尾加句号/逗号等标点
-- 多个答案用英文逗号分隔
+- 使用英文回答
 
 请确保返回有效的 JSON 格式。"""
 
@@ -1157,7 +1170,7 @@ class AgentStateMachine:
             with self.timing_logger.time("  LLM: Generate answer"):
                 response = await self.llm.generate(
                     messages=messages,
-                    temperature=0.1,
+                    temperature=0.2 if is_forced else 0.1,
                     max_tokens=1024
                 )
 

@@ -9,8 +9,8 @@ PYTHON_ENV="/home/ubuntu/miniconda3/envs/vllm/bin/python"
 PROJECT_ROOT="/data/zhz/git/prograph"
 LOG_DIR="${PROJECT_ROOT}/logs"
 CONFIG_FILE="${PROJECT_ROOT}/config.yaml"
-CONCURRENCY=1  # 并行度
-MAX_SAMPLES=100  # 最大处理样本数
+CONCURRENCY=5  # 并行度
+MAX_SAMPLES=5  # 最大处理样本数
 
 # 切换到项目根目录
 cd "$PROJECT_ROOT" || exit 1
@@ -21,8 +21,8 @@ mkdir -p "$LOG_DIR"
 # 数据集配置：训练数据路径|图路径|索引目录|持久化目录
 declare -A DATASETS=(
     ["HotpotQA"]="dataset/HotpotQA/train_data_filtered.json|output/HotpotQA/proposition_graph/linked_graph.pkl|output/HotpotQA/persistence_data|output/HotpotQA/persistence_data"
-    ["2WikiMultihopQA"]="dataset/2WikiMultihopQA/train_data_filtered.json|output/2WikiMultihopQA/proposition_graph/linked_graph.pkl|output/2WikiMultihopQA/persistence_data|output/2WikiMultihopQA/persistence_data"
-    ["MuSiQue"]="dataset/MuSiQue/train_data_filtered.json|output/MuSiQue/proposition_graph/linked_graph.pkl|output/MuSiQue/persistence_data|output/MuSiQue/persistence_data"
+    # ["2WikiMultihopQA"]="dataset/2WikiMultihopQA/train_data_filtered.json|output/2WikiMultihopQA/proposition_graph/linked_graph.pkl|output/2WikiMultihopQA/persistence_data|output/2WikiMultihopQA/persistence_data"
+    # ["MuSiQue"]="dataset/MuSiQue/train_data_filtered.json|output/MuSiQue/proposition_graph/linked_graph.pkl|output/MuSiQue/persistence_data|output/MuSiQue/persistence_data"
 )
 
 # 串行处理每个数据集（数据集之间串行，内部并行）
